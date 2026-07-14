@@ -26,6 +26,7 @@ import {
 import { spectrumGameDef } from './gameDefinition'
 import { makeGroupParticipants, makeStartMarket, makeGetMarketState } from './grouping'
 import { makeExecuteDeal, makeExecuteSwap, makeSettleAuction } from './ledger'
+import { makeCreateAuction, makePlaceBid, makeGetAuctionState, settleAuctionTask } from './auctionLifecycle'
 
 admin.initializeApp()
 
@@ -60,6 +61,12 @@ export const getMarketState             = makeGetMarketState(spectrumGameDef)
 export const executeDeal                = makeExecuteDeal(spectrumGameDef)
 export const executeSwap                = makeExecuteSwap(spectrumGameDef)
 export const settleAuction              = makeSettleAuction(spectrumGameDef)
+
+// ── Auction lifecycle (Slice 2) — create / bid / state + the Cloud Task close ─
+export const createAuction              = makeCreateAuction(spectrumGameDef)
+export const placeBid                   = makePlaceBid(spectrumGameDef)
+export const getAuctionState            = makeGetAuctionState(spectrumGameDef)
+export { settleAuctionTask }
 
 // Guard: the shared dashboard's "Match Now" button is hidden by the Spectrum grouping
 // panel, but if it is ever reached it must NOT run the rolling matcher (which would tile

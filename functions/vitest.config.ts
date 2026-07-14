@@ -5,6 +5,9 @@ import { defineConfig, configDefaults } from 'vitest/config'
 // which boots the Firestore emulator first.
 export default defineConfig({
   test: {
-    exclude: [...configDefaults.exclude, '**/*.emulator.test.ts'],
+    // Only the TS sources under src/ are tests — never the compiled lib/ output (tsc emits
+    // CommonJS there, which vitest can't import). tsconfig now excludes *.test.ts from the
+    // build; 'lib/**' also ignores any stale pre-existing copies.
+    exclude: [...configDefaults.exclude, '**/*.emulator.test.ts', 'lib/**'],
   },
 })

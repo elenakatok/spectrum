@@ -21,15 +21,15 @@ import type { GameDefinition } from '@mygames/game-server'
 import { normalizePassword } from './synergy'
 import { portfolioValueFor, determineAuctionWinner, type SynergyRow, type TeamBid } from './ledgerCore'
 
-type Ref = admin.firestore.DocumentReference
-type Tx = admin.firestore.Transaction
+export type Ref = admin.firestore.DocumentReference
+export type Tx = admin.firestore.Transaction
 
-const isEmu = () => process.env.FUNCTIONS_EMULATOR === 'true'
-const authHeaderOf = (req: { rawRequest: { headers: Record<string, unknown> } }) =>
+export const isEmu = () => process.env.FUNCTIONS_EMULATOR === 'true'
+export const authHeaderOf = (req: { rawRequest: { headers: Record<string, unknown> } }) =>
   req.rawRequest.headers.authorization as string | undefined
 
 /** Resolve a team number -> its group id (teams are fixed after grouping). */
-async function groupIdForTeam(
+export async function groupIdForTeam(
   instanceRef: Ref,
   teamNumber: number,
 ): Promise<string | null> {
@@ -38,7 +38,7 @@ async function groupIdForTeam(
 }
 
 /** Map every team number -> group id in one read (for settlement fan-out). */
-async function teamGroupMap(instanceRef: Ref): Promise<Map<number, string>> {
+export async function teamGroupMap(instanceRef: Ref): Promise<Map<number, string>> {
   const snap = await instanceRef.collection('groups').get()
   const m = new Map<number, string>()
   for (const d of snap.docs) {
@@ -48,11 +48,11 @@ async function teamGroupMap(instanceRef: Ref): Promise<Map<number, string>> {
   return m
 }
 
-const truthRef = (instanceRef: Ref, groupId: string): Ref =>
+export const truthRef = (instanceRef: Ref, groupId: string): Ref =>
   instanceRef.collection('groups').doc(groupId).collection('truth').doc('team')
 
 /** Read a team's full holdings (source of truth) inside the transaction. */
-async function readHoldings(tx: Tx, instanceRef: Ref, teamNumber: number) {
+export async function readHoldings(tx: Tx, instanceRef: Ref, teamNumber: number) {
   const snap = await tx.get(instanceRef.collection('licenses').where('owner_team', '==', teamNumber))
   return snap.docs.map((d) => ({
     id: d.id,
@@ -61,7 +61,7 @@ async function readHoldings(tx: Tx, instanceRef: Ref, teamNumber: number) {
   }))
 }
 
-async function requireMarketOpen(instanceRef: Ref): Promise<void> {
+export async function requireMarketOpen(instanceRef: Ref): Promise<void> {
   const snap = await instanceRef.collection('market').doc('state').get()
   if ((snap.data()?.['status'] as string | undefined) !== 'open') {
     throw new HttpsError('failed-precondition', 'The market is not open.')
@@ -255,20 +255,21 @@ export function makeExecuteSwap(def: GameDefinition) {
 //    Called with an ended auction's id. Instructor/internal auth (in Slice 2 this fires
 //    from a Cloud Task + a resolve-on-read backstop).
 // ─────────────────────────────────────────────────────────────────────────────
-export function makeSettleAuction(def: GameDefinition) {
-  return onCall({ cors: def.corsOrigins }, async (request) => {
-    const data = request.data as Record<string, unknown>
-    const gameInstanceId = await extractInstructorGameId(data, isEmu(), authHeaderOf(request))
-    const auctionId = String(data['auction_id'] ?? data['auctionId'] ?? '')
-    if (!auctionId) throw new HttpsError('invalid-argument', 'auction_id is required')
+/**
+ * Settlement CORE — extracted from the onCall (Slice 2) so that ALL THREE triggers share
+ * ONE implementation: the onCall `settleAuction`, the Cloud Task handler, and the
+ * resolve-on-read backstop. This is a PURE REFACTOR — the transaction body below is the
+ * Slice 1 logic verbatim; behavior is unchanged and re-proven by re-running Slice 1's
+ * 50-test concurrency suite (esp. T8, concurrent double-settle). HttpsError thrown inside
+ * propagates to each caller's own try/catch.
+ */
+export async function runSettlement(gameInstanceId: string, auctionId: string) {
+  const db = admin.firestore()
+  const instanceRef = db.collection('game_instances').doc(gameInstanceId)
+  const auctionRef = instanceRef.collection('auctions').doc(auctionId)
+  const teamMap = await teamGroupMap(instanceRef) // fixed team->group
 
-    try {
-      const db = admin.firestore()
-      const instanceRef = db.collection('game_instances').doc(gameInstanceId)
-      const auctionRef = instanceRef.collection('auctions').doc(auctionId)
-      const teamMap = await teamGroupMap(instanceRef) // fixed team->group
-
-      return await db.runTransaction(async (tx) => {
+  return await db.runTransaction(async (tx) => {
         // ── READS ──
         const auctionSnap = await tx.get(auctionRef)
         if (!auctionSnap.exists) throw new HttpsError('not-found', 'Auction not found.')
@@ -377,6 +378,17 @@ export function makeSettleAuction(def: GameDefinition) {
         void bidByTeam
         return { ok: true as const, alreadySettled: false, status: 'settled', winner_team: winnerTeam, clearing_price: price }
       })
+}
+
+/** onCall wrapper — thin: auth + input, then delegate to the shared runSettlement core. */
+export function makeSettleAuction(def: GameDefinition) {
+  return onCall({ cors: def.corsOrigins }, async (request) => {
+    const data = request.data as Record<string, unknown>
+    const gameInstanceId = await extractInstructorGameId(data, isEmu(), authHeaderOf(request))
+    const auctionId = String(data['auction_id'] ?? data['auctionId'] ?? '')
+    if (!auctionId) throw new HttpsError('invalid-argument', 'auction_id is required')
+    try {
+      return await runSettlement(gameInstanceId, auctionId)
     } catch (err) {
       if (err instanceof HttpsError) throw err
       console.error('[settleAuction] error:', err)

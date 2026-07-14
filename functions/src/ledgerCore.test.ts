@@ -4,6 +4,7 @@ import {
   holdingsByRegion,
   portfolioValueFor,
   determineAuctionWinner,
+  auctionEndsBeforeCutoff,
   type SynergyRow,
   type TeamBid,
 } from './ledgerCore'
@@ -66,5 +67,25 @@ describe('determineAuctionWinner — vendored resolver wrapped with reserve', ()
   })
   it('no bids at all → no sale', () => {
     expect(determineAuctionWinner([], 100)).toEqual({ winnerTeam: null, clearingPrice: null })
+  })
+})
+
+describe('auctionEndsBeforeCutoff — the cutoff boundary, exact (4-min auction, 5-min cutoff)', () => {
+  const T = 10_000_000        // market closes at T (ms)
+  const DURATION = 4          // minutes
+  const CUTOFF = 5            // minutes
+  // cutoff instant = T − 5:00 = T − 300000. An auction created at `now` ends at now+240000.
+  it('created at T−9:01 → accepted (ends at T−5:01, before cutoff)', () => {
+    expect(auctionEndsBeforeCutoff(T - 541_000, DURATION, T, CUTOFF)).toBe(true)
+  })
+  it('created at T−9:00 exactly → accepted (ends exactly at the cutoff; boundary inclusive)', () => {
+    expect(auctionEndsBeforeCutoff(T - 540_000, DURATION, T, CUTOFF)).toBe(true)
+  })
+  it('created at T−8:59 → rejected (ends at T−4:59, inside the final 5 min)', () => {
+    expect(auctionEndsBeforeCutoff(T - 539_000, DURATION, T, CUTOFF)).toBe(false)
+  })
+  it('default cutoff is 5 minutes', () => {
+    expect(auctionEndsBeforeCutoff(T - 540_000, DURATION, T)).toBe(true)
+    expect(auctionEndsBeforeCutoff(T - 539_000, DURATION, T)).toBe(false)
   })
 })

@@ -186,6 +186,8 @@ export const seedLedgerTest = onRequest(async (req, res) => {
   const body = (req.body?.data ?? req.body) as {
     game_instance_id?: string
     market_status?: string
+    closes_in_ms?: number             // market closes at (now + this); for cutoff tests
+    auction_duration_minutes?: number // default 4
     teams?: SeedTeam[]
     licenses?: SeedLicense[]
     auctions?: SeedAuction[]
@@ -278,10 +280,16 @@ export const seedLedgerTest = onRequest(async (req, res) => {
     })
   }
 
-  batch.set(instanceRef.collection('market').doc('state'), {
+  const marketState: Record<string, unknown> = {
     status: body.market_status ?? 'open', num_teams: teams.length,
     num_regions: allRegions.length, starting_cash: 1000,
-  })
+    auction_duration_minutes: body.auction_duration_minutes ?? 4,
+  }
+  if (body.closes_in_ms != null) {
+    marketState.closes_at = Timestamp.fromMillis(now.toMillis() + body.closes_in_ms)
+    marketState.opened_at = now
+  }
+  batch.set(instanceRef.collection('market').doc('state'), marketState)
 
   await batch.commit()
   void regionOfLicenseId

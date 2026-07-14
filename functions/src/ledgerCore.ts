@@ -66,6 +66,26 @@ export interface TeamBid {
   atMs: number // server-receipt time; tie-break only
 }
 
+export const AUCTION_CUTOFF_MINUTES = 5 // fixed; no new auctions in the final 5 min (v3 §1)
+
+/**
+ * The cutoff rule (v3 §1; the legacy never implemented it). An auction may be created only
+ * if it will END at or before `market close − cutoff`. Accept iff
+ *   now + durationMin  <=  closesAt − cutoffMin
+ * i.e. endsAt <= cutoff. Equality is accepted (boundary inclusive). All args in ms except
+ * the minute durations. Pure — unit-tested at the exact boundary.
+ */
+export function auctionEndsBeforeCutoff(
+  nowMs: number,
+  durationMin: number,
+  closesAtMs: number,
+  cutoffMin: number = AUCTION_CUTOFF_MINUTES,
+): boolean {
+  const endsAt = nowMs + durationMin * 60_000
+  const cutoff = closesAtMs - cutoffMin * 60_000
+  return endsAt <= cutoff
+}
+
 /**
  * Determine the auction winner via the vendored eBay resolver (unmodified).
  *

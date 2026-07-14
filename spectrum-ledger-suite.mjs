@@ -47,6 +47,22 @@ const swap  = (pid, regionX, quantityX, regionY, quantityY, partnerTeam, partner
   callFn('executeSwap', { _test: { participant_id: pid, game_instance_id: GID }, regionX, quantityX, regionY, quantityY, partnerTeam, partnerPassword })
 const settle = (auctionId) =>
   callFn('settleAuction', { _dev: { game_instance_id: GID }, auction_id: auctionId })
+// Slice 2 lifecycle callables
+const createAuction = (pid, region, quantity, reserve) =>
+  callFn('createAuction', { _test: { participant_id: pid, game_instance_id: GID }, region, quantity, reserve })
+const placeBid = (pid, auctionId, amount) =>
+  callFn('placeBid', { _test: { participant_id: pid, game_instance_id: GID }, auction_id: auctionId, amount })
+const getAuctionState = (pid, auctionId) =>
+  callFn('getAuctionState', { _test: { participant_id: pid, game_instance_id: GID }, auction_id: auctionId })
+// The PRIMARY close trigger — invoke the Cloud Task handler's emulator HTTP endpoint directly
+// (the same onTaskDispatched handler Cloud Tasks would invoke → the same runSettlement core).
+async function fireCloudTask(auctionId) {
+  const res = await fetch(`${FUNCTIONS}/settleAuctionTask`, {
+    method: 'POST', headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ data: { game_instance_id: GID, auction_id: auctionId } }),
+  })
+  return { status: res.status, body: await res.text().catch(() => '') }
+}
 
 async function fsGet(suffix) {
   const res = await fetch(`${FIRESTORE}/game_instances/${GID}/${suffix}`, { headers: { Authorization: 'Bearer owner' } })
@@ -92,8 +108,14 @@ async function txns() {
 async function auction(id) {
   const d = await fsGet(`auctions/${id}`)
   if (!d?.fields) return null
-  return { status: strVal(d.fields.status), winner_team: numVal(d.fields.winner_team), clearing_price: numVal(d.fields.clearing_price) }
+  return {
+    status: strVal(d.fields.status), winner_team: numVal(d.fields.winner_team),
+    clearing_price: numVal(d.fields.clearing_price),
+    under_auction: null, reserve: numVal(d.fields.reserve),
+  }
 }
+async function licenseUnderAuction(id) { return (await license(id))?.under_auction ?? null }
+async function auctionEventCount() { return (await txns()).filter(t => t.type === 'auction').length }
 async function totalCash(teams) {
   let sum = 0
   for (const t of teams) sum += (await truth(t))?.cash ?? 0
@@ -399,6 +421,278 @@ async function main() {
     assert(rGood.ok, `T9c: correct password accepted case-insensitively + whitespace-trimmed ('  CORRECT2 ')`)
     assert((await txns()).length === 1, `T9: exactly one event (only the authorized deal)`)
     assert((await totalCash([1, 2, 5])) === total0, `T9: CASH CONSERVATION`)
+  }
+
+  // ══════════════════════ SLICE 2 — AUCTION LIFECYCLE ══════════════════════
+  banner('════ SLICE 2 — auction lifecycle (Slice 1 above is now regression) ════')
+
+  // ══ S1 — createAuction: locks the lot, sets it live ══
+  banner('S1 — createAuction locks the lot and goes live')
+  {
+    await seed({
+      closes_in_ms: 1_200_000, auction_duration_minutes: 4,
+      teams: [{ team_number: 1, members: ['p-1'], cash: 1000, password: PW(1) }],
+      licenses: [{ id: 'C1', region: 'C', owner_team: 1 }, { id: 'C2', region: 'C', owner_team: 1 }, { id: 'C3', region: 'C', owner_team: 1 }],
+    })
+    const r = await createAuction('p-1', 'C', 2, 500)
+    assert(r.ok && typeof r.result.auction_id === 'string', `S1: createAuction succeeds [${r.ok ? 'ok' : r.error}]`)
+    const aid = r.result?.auction_id
+    const a = await auction(aid)
+    assert(a?.status === 'open', `S1: auction is open`)
+    assert((await licenseUnderAuction('C1')) === aid && (await licenseUnderAuction('C2')) === aid, `S1: the 2 licenses are locked under this auction`)
+    assert((await licenseUnderAuction('C3')) === null, `S1: the un-listed license stays free`)
+  }
+
+  // ══ S2 — cutoff rule (end-to-end; exact boundary is in the unit test) ══
+  banner('S2 — cutoff rule: auction must finish ≥5 min before market close')
+  {
+    // ACCEPT: closes in 10 min, 4-min auction ends at +4 min, cutoff at close−5 = +5 min → +4 ≤ +5.
+    await seed({
+      closes_in_ms: 600_000, auction_duration_minutes: 4,
+      teams: [{ team_number: 1, members: ['p-1'], cash: 1000, password: PW(1) }],
+      licenses: [{ id: 'C1', region: 'C', owner_team: 1 }, { id: 'D1', region: 'D', owner_team: 1 }],
+    })
+    const rOk = await createAuction('p-1', 'C', 1, 0)
+    assert(rOk.ok, `S2a: closes_in=10min, 4-min auction ACCEPTED (ends +4min ≤ cutoff +5min) [${rOk.ok ? 'ok' : rOk.error}]`)
+    // REJECT: closes in 8 min → cutoff at +3 min, 4-min auction ends at +4 min > +3 min.
+    await seed({
+      closes_in_ms: 480_000, auction_duration_minutes: 4,
+      teams: [{ team_number: 1, members: ['p-1'], cash: 1000, password: PW(1) }],
+      licenses: [{ id: 'C1', region: 'C', owner_team: 1 }],
+    })
+    const rNo = await createAuction('p-1', 'C', 1, 0)
+    assert(!rNo.ok && /cannot finish before the market closes/.test(rNo.error ?? ''), `S2b: closes_in=8min REJECTED (ends +4min > cutoff +3min) [${rNo.error}]`)
+  }
+
+  // ══ S3 — placeBid + escrow + one-bid-per-team ══
+  banner('S3 — placeBid escrows; one bid per team; two live bids cannot promise the same dollar')
+  {
+    await seed({
+      teams: [
+        { team_number: 1, members: ['p-1'], cash: 1000, password: PW(1) },
+        { team_number: 2, members: ['p-2'], cash: 500, password: PW(2) },
+      ],
+      licenses: [{ id: 'C1', region: 'C', owner_team: 1, under_auction: 'A' }, { id: 'D1', region: 'D', owner_team: 1, under_auction: 'B' }],
+      auctions: [
+        { id: 'A', region: 'C', quantity: 1, seller_team: 1, reserve: 100, license_ids: ['C1'], ends_at_ms: 9_999_999_999_999, status: 'open' },
+        { id: 'B', region: 'D', quantity: 1, seller_team: 1, reserve: 100, license_ids: ['D1'], ends_at_ms: 9_999_999_999_999, status: 'open' },
+      ],
+    })
+    const total0 = await totalCash([1, 2])
+    const r1 = await placeBid('p-2', 'A', 300)
+    assert(r1.ok, `S3a: bid 300 accepted [${r1.ok ? 'ok' : r1.error}]`)
+    assert((await truth(2)).escrowed === 300, `S3a: escrow rose to 300 (available 500→200)`)
+    const r2 = await placeBid('p-2', 'A', 250)
+    assert(!r2.ok && /already bid/.test(r2.error ?? ''), `S3b: a SECOND bid on the same auction is rejected (no revisions) [${r2.error}]`)
+    const r3 = await placeBid('p-2', 'B', 300)
+    assert(!r3.ok && /sufficient available funds/.test(r3.error ?? ''), `S3c: a second LIVE bid ($300) with only $200 available is rejected (can't promise the same dollar twice) [${r3.error}]`)
+    assert((await totalCash([1, 2])) === total0, `S3: CASH CONSERVATION (escrow is not a cash move)`)
+  }
+
+  // ══ S4 — bid guards ══
+  banner('S4 — bid guards: seller can\'t bid, no bids on ended auctions, amount > 0')
+  {
+    await seed({
+      teams: [
+        { team_number: 1, members: ['p-1'], cash: 1000, password: PW(1) },
+        { team_number: 2, members: ['p-2'], cash: 10000, password: PW(2) },
+      ],
+      licenses: [{ id: 'C1', region: 'C', owner_team: 1, under_auction: 'A' }, { id: 'D1', region: 'D', owner_team: 1, under_auction: 'E' }],
+      auctions: [
+        { id: 'A', region: 'C', quantity: 1, seller_team: 1, reserve: 100, license_ids: ['C1'], ends_at_ms: 9_999_999_999_999, status: 'open' },
+        { id: 'E', region: 'D', quantity: 1, seller_team: 1, reserve: 100, license_ids: ['D1'], ends_at_ms: 1000, status: 'open' }, // already ended
+      ],
+    })
+    const rSelf = await placeBid('p-1', 'A', 200)
+    assert(!rSelf.ok && /own auction/.test(rSelf.error ?? ''), `S4a: seller bidding on own auction rejected [${rSelf.error}]`)
+    const rEnded = await placeBid('p-2', 'E', 200)
+    assert(!rEnded.ok && /ended/.test(rEnded.error ?? ''), `S4b: bidding on an ended auction rejected (backstop settles it first) [${rEnded.error}]`)
+    const rZero = await placeBid('p-2', 'A', 0)
+    assert(!rZero.ok, `S4c: a non-positive bid amount is rejected`)
+  }
+
+  // ══ S5 — CLOSE MECHANICS: Cloud Task, backstop, both racing (NAMED ASSERTION) ══
+  banner('S5 — close: task alone / backstop alone / BOTH concurrent (named) / settled-touched-again')
+  const auctionSeed = () => ({
+    teams: [
+      { team_number: 9, members: ['p-9'], cash: 1000, password: PW(9) },
+      { team_number: 2, members: ['p-2'], cash: 10000, escrowed: 500, password: PW(2) },
+    ],
+    licenses: [{ id: 'G1', region: 'G', owner_team: 9, under_auction: 'A' }],
+    auctions: [{ id: 'A', region: 'G', quantity: 1, seller_team: 9, reserve: 100, license_ids: ['G1'], ends_at_ms: 1000 }],
+    bids: [{ auction_id: 'A', team_number: 2, amount: 500, at_ms: 100 }],
+  })
+  {
+    // Backstop alone (Cloud Task never arrives — simulate failure): getAuctionState settles it.
+    await seed(auctionSeed())
+    const gs = await getAuctionState('p-2', 'A')
+    assert(gs.ok, `S5-backstop: getAuctionState on an ended auction succeeds (resolve-on-read)`)
+    assert((await auction('A')).status === 'settled' && (await truth(2)).cash === 9500, `S5-backstop: BACKSTOP ALONE settled it (winner charged once)`)
+  }
+  {
+    // Cloud Task alone: invoke the task handler → settles.
+    await seed(auctionSeed())
+    const ct = await fireCloudTask('A')
+    // wait briefly for the async settle
+    for (let i = 0; i < 20 && (await auction('A')).status !== 'settled'; i++) await sleep(300)
+    assert((await auction('A')).status === 'settled' && (await truth(2)).cash === 9500,
+      `S5-task: CLOUD TASK ALONE settled it via the settleAuctionTask handler [http ${ct.status}]`)
+  }
+  {
+    // NAMED ASSERTION — both fire concurrently → settles exactly once.
+    await seed(auctionSeed())
+    const total0 = await totalCash([2, 9])
+    const [ct, gs] = await Promise.all([fireCloudTask('A'), getAuctionState('p-2', 'A')])
+    for (let i = 0; i < 20 && (await auction('A')).status !== 'settled'; i++) await sleep(300)
+    void ct; void gs
+    assert((await auction('A')).status === 'settled', `S5-NAMED: both paths racing → auction settled`)
+    assert((await truth(2)).cash === 9500, `S5-NAMED: winner charged EXACTLY once (10000→9500, not 9000)`)
+    assert((await truth(9)).cash === 1500, `S5-NAMED: seller paid EXACTLY once (1000→1500)`)
+    assert((await auctionEventCount()) === 1, `S5-NAMED: exactly ONE auction transaction event (double-settle impossible)`)
+    assert((await truth(2)).escrowed === 0, `S5-NAMED: winner escrow released once`)
+    assert((await totalCash([2, 9])) === total0, `S5-NAMED: CASH CONSERVATION`)
+    // Touch again after settlement → no-op.
+    await getAuctionState('p-2', 'A'); await fireCloudTask('A'); await sleep(400)
+    assert((await truth(2)).cash === 9500 && (await auctionEventCount()) === 1, `S5-again: a settled auction touched again → no-op, no second charge, no second event`)
+  }
+
+  // ══ S6 — settlement rules via the lifecycle ══
+  banner('S6 — settlement rules: at-reserve WINS (named secondary), below-reserve no-sale, ties, no bids')
+  {
+    // At-reserve WINS (SECONDARY NAMED ASSERTION).
+    await seed({
+      teams: [{ team_number: 9, members: ['p-9'], cash: 1000, password: PW(9) }, { team_number: 2, members: ['p-2'], cash: 10000, escrowed: 500, password: PW(2) }],
+      licenses: [{ id: 'G1', region: 'G', owner_team: 9, under_auction: 'A' }],
+      auctions: [{ id: 'A', region: 'G', quantity: 1, seller_team: 9, reserve: 500, license_ids: ['G1'], ends_at_ms: 1000 }],
+      bids: [{ auction_id: 'A', team_number: 2, amount: 500, at_ms: 100 }],
+    })
+    await getAuctionState('p-2', 'A')
+    const a = await auction('A')
+    assert(a.status === 'settled' && a.winner_team === 2 && a.clearing_price === 500, `S6-at-reserve: a bid EXACTLY at reserve WINS (legacy voided it) [status=${a.status} winner=${a.winner_team} price=${a.clearing_price}]`)
+    assert((await license('G1')).owner_team === 2, `S6-at-reserve: lot moved to the at-reserve winner`)
+  }
+  {
+    // One cent below reserve → no sale, licenses freed, escrow released.
+    await seed({
+      teams: [{ team_number: 9, members: ['p-9'], cash: 1000, password: PW(9) }, { team_number: 2, members: ['p-2'], cash: 10000, escrowed: 499, password: PW(2) }],
+      licenses: [{ id: 'G1', region: 'G', owner_team: 9, under_auction: 'A' }],
+      auctions: [{ id: 'A', region: 'G', quantity: 1, seller_team: 9, reserve: 500, license_ids: ['G1'], ends_at_ms: 1000 }],
+      bids: [{ auction_id: 'A', team_number: 2, amount: 499, at_ms: 100 }],
+    })
+    const total0 = await totalCash([2, 9])
+    await getAuctionState('p-2', 'A')
+    assert((await auction('A')).status === 'no_sale', `S6-below: one cent below reserve → NO SALE`)
+    assert((await license('G1')).owner_team === 9 && (await license('G1')).under_auction === null, `S6-below: license returns to seller, freed`)
+    assert((await truth(2)).escrowed === 0, `S6-below: escrow released (cash comes back)`)
+    assert((await totalCash([2, 9])) === total0, `S6-below: CASH CONSERVATION`)
+  }
+  {
+    // Ties → earliest bid wins.
+    await seed({
+      teams: [
+        { team_number: 9, members: ['p-9'], cash: 1000, password: PW(9) },
+        { team_number: 2, members: ['p-2'], cash: 10000, escrowed: 500, password: PW(2) },
+        { team_number: 3, members: ['p-3'], cash: 10000, escrowed: 500, password: PW(3) },
+      ],
+      licenses: [{ id: 'G1', region: 'G', owner_team: 9, under_auction: 'A' }],
+      auctions: [{ id: 'A', region: 'G', quantity: 1, seller_team: 9, reserve: 100, license_ids: ['G1'], ends_at_ms: 1000 }],
+      bids: [{ auction_id: 'A', team_number: 3, amount: 500, at_ms: 250 }, { auction_id: 'A', team_number: 2, amount: 500, at_ms: 100 }],
+    })
+    await getAuctionState('p-9', 'A')
+    assert((await auction('A')).winner_team === 2, `S6-tie: equal bids → EARLIEST (team 2 @100ms) wins over team 3 @250ms`)
+  }
+  {
+    // No bids at all → no sale, freed.
+    await seed({
+      teams: [{ team_number: 9, members: ['p-9'], cash: 1000, password: PW(9) }],
+      licenses: [{ id: 'G1', region: 'G', owner_team: 9, under_auction: 'A' }],
+      auctions: [{ id: 'A', region: 'G', quantity: 1, seller_team: 9, reserve: 100, license_ids: ['G1'], ends_at_ms: 1000 }],
+    })
+    await getAuctionState('p-9', 'A')
+    assert((await auction('A')).status === 'no_sale' && (await license('G1')).under_auction === null, `S6-nobids: no bids → no sale, license freed`)
+  }
+
+  // ══ S7 — locks: re-auction rejected (Slice 1 T7 completion); freed after settle ══
+  banner('S7 — re-auction of a locked license rejected; freely tradeable again after settlement')
+  {
+    await seed({
+      closes_in_ms: 1_200_000,
+      teams: [{ team_number: 1, members: ['p-1'], cash: 1000, password: PW(1) }, { team_number: 2, members: ['p-2'], cash: 10000, password: PW(2) }],
+      licenses: [{ id: 'C1', region: 'C', owner_team: 1, under_auction: 'A' }],
+      auctions: [{ id: 'A', region: 'C', quantity: 1, seller_team: 1, reserve: 100, license_ids: ['C1'], ends_at_ms: 1000 }],
+    })
+    const rRe = await createAuction('p-1', 'C', 1, 0)
+    assert(!rRe.ok && /already under auction|not hold/.test(rRe.error ?? ''), `S7a: RE-AUCTION of an auction-locked license rejected (the Slice 1 T7 deferral, now complete) [${rRe.error}]`)
+    // settle (no bids → no sale) frees the license; now it trades.
+    await getAuctionState('p-1', 'A')
+    assert((await license('C1')).under_auction === null, `S7b: after settlement the license is unlocked`)
+    // need market open with a close time for a fresh createAuction; re-seed adds closes_in_ms
+    await seed({
+      closes_in_ms: 1_200_000,
+      teams: [{ team_number: 1, members: ['p-1'], cash: 1000, password: PW(1) }],
+      licenses: [{ id: 'C1', region: 'C', owner_team: 1 }],
+    })
+    const rOk = await createAuction('p-1', 'C', 1, 0)
+    assert(rOk.ok, `S7c: an unlocked license can be auctioned again`)
+  }
+
+  // ══ S8 — PRIVACY: getAuctionState leaks nothing (the Slice 3 privacy-walk foundation) ══
+  banner('S8 — privacy: no reserve, no bid amounts, no bid count; clearing price only to parties')
+  {
+    const RESERVE = 317, BID2 = 411, BID3 = 522 // distinctive values to grep for
+    await seed({
+      teams: [
+        { team_number: 1, members: ['p-1'], cash: 1000, password: PW(1) },
+        { team_number: 2, members: ['p-2'], cash: 10000, escrowed: BID2, password: PW(2) },
+        { team_number: 3, members: ['p-3'], cash: 10000, escrowed: BID3, password: PW(3) },
+        { team_number: 4, members: ['p-4'], cash: 10000, password: PW(4) },
+      ],
+      licenses: [{ id: 'C1', region: 'C', owner_team: 1, under_auction: 'A' }],
+      auctions: [{ id: 'A', region: 'C', quantity: 1, seller_team: 1, reserve: RESERVE, license_ids: ['C1'], ends_at_ms: 9_999_999_999_999, status: 'open' }],
+      bids: [{ auction_id: 'A', team_number: 2, amount: BID2, at_ms: 100 }, { auction_id: 'A', team_number: 3, amount: BID3, at_ms: 200 }],
+    })
+    const hasNum = (obj, n) => JSON.stringify(obj).includes(String(n))
+    // LIVE: a non-bidding team sees nothing sensitive.
+    const live4 = await getAuctionState('p-4', 'A')
+    assert(live4.ok && !hasNum(live4.result, RESERVE) && !hasNum(live4.result, BID2) && !hasNum(live4.result, BID3),
+      `S8a-live: non-bidder sees NO reserve, NO bid amounts (grep clean)`)
+    assert(!('bid_count' in live4.result) && !('bids' in live4.result), `S8a-live: no bid count / bid list field present`)
+    // LIVE: a bidder sees ONLY their own bid, not the reserve, not the other bid.
+    const live2 = await getAuctionState('p-2', 'A')
+    assert(live2.result.your_bid === BID2 && !hasNum(live2.result, RESERVE) && !hasNum(live2.result, BID3),
+      `S8b-live: bidder sees own bid (${BID2}) but NOT reserve, NOT the other bid (${BID3})`)
+    // Now settle (both bids ≥ reserve; team 3 @522 wins).
+    // give it a past end by re-seeding as ended, preserving bids + escrow.
+    await seed({
+      teams: [
+        { team_number: 1, members: ['p-1'], cash: 1000, password: PW(1) },
+        { team_number: 2, members: ['p-2'], cash: 10000, escrowed: BID2, password: PW(2) },
+        { team_number: 3, members: ['p-3'], cash: 10000, escrowed: BID3, password: PW(3) },
+        { team_number: 4, members: ['p-4'], cash: 10000, password: PW(4) },
+      ],
+      licenses: [{ id: 'C1', region: 'C', owner_team: 1, under_auction: 'A' }],
+      auctions: [{ id: 'A', region: 'C', quantity: 1, seller_team: 1, reserve: RESERVE, license_ids: ['C1'], ends_at_ms: 1000 }],
+      bids: [{ auction_id: 'A', team_number: 2, amount: BID2, at_ms: 100 }, { auction_id: 'A', team_number: 3, amount: BID3, at_ms: 200 }],
+    })
+    await getAuctionState('p-1', 'A') // seller touch settles it
+    const aq = await auction('A')
+    assert(aq.status === 'settled' && aq.winner_team === 3 && aq.clearing_price === BID3, `S8-settle: team 3 wins @ ${BID3}`)
+    // LOSER (team 2): learns it lost, NOT the clearing price, NOT the reserve.
+    const loser = await getAuctionState('p-2', 'A')
+    assert(loser.result.you_won === false, `S8c: loser learns they LOST`)
+    assert(!hasNum(loser.result, BID3) && !hasNum(loser.result, RESERVE),
+      `S8c: loser does NOT learn the clearing price (${BID3}) or the reserve (${RESERVE}) [grep clean]`)
+    // NON-PARTY (team 4): learns nothing but that it settled.
+    const np = await getAuctionState('p-4', 'A')
+    assert(!hasNum(np.result, BID3) && !hasNum(np.result, RESERVE) && !hasNum(np.result, BID2),
+      `S8d: non-party sees NO clearing price, NO reserve, NO bids [grep clean]`)
+    // WINNER (team 3) + SELLER (team 1): a party, learns the price.
+    const winner = await getAuctionState('p-3', 'A')
+    const seller = await getAuctionState('p-1', 'A')
+    assert(winner.result.clearing_price === BID3 && winner.result.you_won === true, `S8e: WINNER learns what they paid (${BID3})`)
+    assert(seller.result.clearing_price === BID3, `S8f: SELLER (a party) learns the sale price (${BID3})`)
+    assert(!hasNum(np.result, RESERVE) && !hasNum(winner.result, RESERVE) && !hasNum(seller.result, RESERVE),
+      `S8g: the RESERVE (${RESERVE}) leaks to NOBODY — not winner, not seller, not non-party`)
   }
 
   banner(`RESULT — ${PASS}/${PASS + FAIL} green${FAIL ? `  (${FAIL} FAILED)` : ''}`)
