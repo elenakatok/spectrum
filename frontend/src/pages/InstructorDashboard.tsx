@@ -12,7 +12,7 @@ const roleLabels = Object.fromEntries(
 // ── Spectrum GROUPING PANEL (Slice 0) ─────────────────────────────────────────────
 // Spectrum forms teams via an instructor-driven, TWO-STEP flow (v3 §9.1 + Slice 0
 // addenda) that REPLACES the shared rolling matcher:
-//   1. type N (even, 14–26) → Set Number of Groups → Group Participants  (status 'grouped')
+//   1. type N (even, 14–26) → Set Number of Teams → Group Participants  (status 'grouped')
 //   2. Start Market  (status 'open', clock starts)
 //
 // The shared dashboard has no injection slot and its "Match Now" button is hardwired to
@@ -25,12 +25,30 @@ const roleLabels = Object.fromEntries(
 const money = (n: number | null | undefined) =>
   n == null ? '—' : '$' + Math.round(n).toLocaleString('en-US')
 
-// Hide the shared "Match Now" button — Spectrum groups via this panel instead.
-function hideSharedMatchButton() {
+// Tidy the shared dashboard to Spectrum's vocabulary WITHOUT a shared-package change —
+// same DOM-patch pattern as eBay's auction strip. Re-applied on every poll tick so it
+// survives the shared component's re-renders (sort, roster refresh):
+//   1. hide "Match Now" — Spectrum groups via the panel above, not the rolling matcher;
+//   2. hide the vestigial single-role "Show: Trader" roster filter (one role → nothing to filter);
+//   3. "Teams" everywhere, never "Groups" (v3 §11 / Slice 3): relabel the roster "Group #" header.
+function tidySharedDashboard() {
   for (const btn of Array.from(document.querySelectorAll('button'))) {
     const t = (btn.textContent ?? '').trim()
-    if (t === 'Match Now' || t === 'Matching…') {
-      ;(btn as HTMLElement).style.display = 'none'
+    if (t === 'Match Now' || t === 'Matching…') (btn as HTMLElement).style.display = 'none'
+  }
+  for (const span of Array.from(document.querySelectorAll('span'))) {
+    if ((span.textContent ?? '').trim() === 'Show:') {
+      const box = span.parentElement as HTMLElement | null
+      if (box) box.style.display = 'none'
+    }
+  }
+  for (const th of Array.from(document.querySelectorAll('th'))) {
+    // {col.label} renders as its OWN text node, separate from the sort arrow — so
+    // replacing just that node's text keeps the caret intact.
+    for (const node of Array.from(th.childNodes)) {
+      if (node.nodeType === Node.TEXT_NODE && node.nodeValue?.includes('Group #')) {
+        node.nodeValue = node.nodeValue.replace('Group #', 'Team #')
+      }
     }
   }
 }
@@ -54,11 +72,11 @@ function GroupingPanel() {
     return () => { node.remove(); setHost(null) }
   }, [])
 
-  // Poll market state (drives button enablement) + keep Match Now hidden.
+  // Poll market state (drives button enablement) + keep the shared dashboard tidy.
   useEffect(() => {
     let alive = true
     const tick = () => {
-      hideSharedMatchButton()
+      tidySharedDashboard()
       getMarketState()
         .then(s => { if (alive) setState(s) })
         .catch(() => { /* session not ready yet — retry on the interval */ })
@@ -130,7 +148,7 @@ function GroupingPanel() {
               style={{ width: 70, padding: '0.25rem 0.4rem' }}
             />
           </label>
-          <button data-testid="set-num-teams" onClick={doSetN} disabled={busy}>Set Number of Groups</button>
+          <button data-testid="set-num-teams" onClick={doSetN} disabled={busy}>Set Number of Teams</button>
           <button data-testid="group-participants" onClick={doGroup} disabled={busy || nSet == null}>
             Group Participants
           </button>

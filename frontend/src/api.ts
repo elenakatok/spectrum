@@ -63,8 +63,74 @@ export const submitLeadOutcome = (args: CallArgs, outcome: OutcomeFields | null)
 export const submitConfirmation = (args: CallArgs, confirmed: boolean) =>
   callFn<{ ok: boolean; outcome: string }>('submitConfirmation', { ...args, confirmed })
 
-// PHASE A SKELETON: the live trading market (deals, swaps, auctions) is DELIBERATELY
-// ABSENT — it arrives in Slices 1–5 (Spectrum_Build_Plan_v1.md). No market callables here.
+// ── Market actions (Slices 1–2) — SDK auto-attaches the student Firebase Bearer ──────
+// Payload only; the Firebase SDK attaches the ID token. Errors arrive as FirebaseError
+// whose .message is the server's deliberately non-leaking text — surface it verbatim.
+
+export const executeDeal = (p: {
+  region: string; quantity: number; price: number; buyerTeam: number; buyerPassword: string
+}) => callFn<{ ok: boolean; transaction_id: string; moved: string[] }>('executeDeal', p)
+
+export const executeSwap = (p: {
+  regionX: string; quantityX: number; regionY: string; quantityY: number; partnerTeam: number; partnerPassword: string
+}) => callFn<{ ok: boolean; transaction_id: string; gave: string[]; got: string[] }>('executeSwap', p)
+
+export const createAuction = (p: { region: string; quantity: number; reserve: number }) =>
+  callFn<{ ok: boolean; auction_id: string; ends_at: number }>('createAuction', p)
+
+export const placeBid = (p: { auction_id: string; amount: number }) =>
+  callFn<{ ok: boolean; auction_id: string; amount: number }>('placeBid', p)
+
+export type AuctionState = {
+  ok: boolean
+  auction_id: string
+  region: string
+  quantity: number
+  seller_team: number
+  status: 'open' | 'settled' | 'no_sale' | string
+  time_remaining_ms: number
+  your_bid?: number
+  your_available_cash?: number
+  clearing_price?: number | null
+  you_won?: boolean
+}
+export const getAuctionState = (auctionId: string) =>
+  callFn<AuctionState>('getAuctionState', { auction_id: auctionId })
+
+// ── Student read-paths (Slice 3) — own team-private data + the names roster ──────────
+
+export type TeamState = {
+  ok: boolean
+  team_number: number
+  cash: number
+  escrowed: number
+  available: number
+  license_ids: string[]
+  license_value: number
+  portfolio_value: number
+}
+export const getTeamState = () => callFn<TeamState>('getTeamState', {})
+
+export type HistoryRow = {
+  transaction_id: string
+  type: 'deal' | 'swap' | 'auction' | string
+  from_team: number | null
+  to_team: number | null
+  region: string | null
+  quantity: number | null
+  region_x: string | null
+  quantity_x: number | null
+  region_y: string | null
+  quantity_y: number | null
+  price: number | null
+  at: number | null
+}
+export const getTeamHistory = () =>
+  callFn<{ ok: boolean; team_number: number; rows: HistoryRow[] }>('getTeamHistory', {})
+
+export type TeamDirectoryEntry = { team_number: number; member_names: string[] }
+export const getTeamsDirectory = () =>
+  callFn<{ ok: boolean; teams: TeamDirectoryEntry[] }>('getTeamsDirectory', {})
 
 // ── Instructor API ────────────────────────────────────────────────────────────
 

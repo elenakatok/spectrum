@@ -27,6 +27,7 @@ import { spectrumGameDef } from './gameDefinition'
 import { makeGroupParticipants, makeStartMarket, makeGetMarketState } from './grouping'
 import { makeExecuteDeal, makeExecuteSwap, makeSettleAuction } from './ledger'
 import { makeCreateAuction, makePlaceBid, makeGetAuctionState, settleAuctionTask } from './auctionLifecycle'
+import { makeGetTeamState, makeGetTeamHistory, makeGetTeamsDirectory } from './studentReads'
 
 admin.initializeApp()
 
@@ -67,6 +68,11 @@ export const createAuction              = makeCreateAuction(spectrumGameDef)
 export const placeBid                   = makePlaceBid(spectrumGameDef)
 export const getAuctionState            = makeGetAuctionState(spectrumGameDef)
 export { settleAuctionTask }
+
+// ── Student read-paths (Slice 3) — read-only; the five tabs' private data ─────
+export const getTeamState               = makeGetTeamState(spectrumGameDef)
+export const getTeamHistory             = makeGetTeamHistory(spectrumGameDef)
+export const getTeamsDirectory          = makeGetTeamsDirectory(spectrumGameDef)
 
 // Guard: the shared dashboard's "Match Now" button is hidden by the Spectrum grouping
 // panel, but if it is ever reached it must NOT run the rolling matcher (which would tile
