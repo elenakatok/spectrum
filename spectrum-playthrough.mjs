@@ -64,12 +64,18 @@ const PORTS = [9101, 5005, 8082, 9002, 5006, 4002, 5173]
 
 // A fresh instance id per run so re-runs never collide.
 const GID  = process.env.GID ?? `pt-${Date.now()}`
-// 5 students. ONE is the TRUE NO-SHOW (launches + completes KC, never attends class);
-// the other 4 attend → single-role matching tiles to [4] (one group). The held-back
-// no-show proves the −2 floor. composition {trader:4}.
-const PIDS = Array.from({ length: 5 }, (_, i) => `stu-${i + 1}`)
-const NOSHOW_PID  = PIDS[PIDS.length - 1]              // stu-5 — launches + KC, never attends
-const ATTEND_PIDS = PIDS.filter(p => p !== NOSHOW_PID) // the 4 who attend → [4]
+
+// Slice 0: grouping needs N (even, 14–26) present traders to form N teams. N=14 (min).
+// 5 students go through the REAL UI (all launch + KC assertions live here); stu-5 is the
+// TRUE NO-SHOW (launches + completes KC, never attends). 10 more are SEEDED as present
+// fillers so grouping has 14 present traders. 15 participants total (14 present + 1 no-show).
+const N_TEAMS     = 14
+const UI_PIDS     = Array.from({ length: 5 }, (_, i) => `stu-${i + 1}`)
+const NOSHOW_PID  = UI_PIDS[UI_PIDS.length - 1]                     // stu-5
+const UI_ATTEND   = UI_PIDS.filter(p => p !== NOSHOW_PID)          // stu-1..4 attend via UI
+const FILLER_PIDS = Array.from({ length: 10 }, (_, i) => `stu-${i + 6}`) // stu-6..15 (seeded)
+const ALL_PIDS    = [...UI_PIDS, ...FILLER_PIDS]                   // 15 total
+const PRESENT_PIDS = [...UI_ATTEND, ...FILLER_PIDS]                // 14 present → grouped
 
 // ── KC skeleton: single-option gate + 2 PLACEHOLDER graded statics ──────────────
 // For each static, a UNIQUE substring of the CORRECT option label and of a WRONG option
@@ -85,8 +91,8 @@ const KC_WRONG = {
   kc_stub_two: 'A false placeholder statement',
 }
 // Answer plan by pid: stu-1 → 1/2 (score 0.5); stu-2 → 0/2 (score 0); all others → 2/2 (1.0).
-const KC_HALF_PID = PIDS[0]   // stu-1
-const KC_ZERO_PID = PIDS[1]   // stu-2
+const KC_HALF_PID = UI_PIDS[0]   // stu-1
+const KC_ZERO_PID = UI_PIDS[1]   // stu-2
 function kcPlanFor(pid) {
   if (pid === KC_HALF_PID) return new Set(['kc_stub_one'])
   if (pid === KC_ZERO_PID) return new Set()
@@ -199,6 +205,73 @@ async function pollParticipants(pred, maxMs = 30_000) {
 async function readAttendanceCode() {
   const doc = await fsGetDoc('attendance_code/current')
   return doc?.fields?.code?.stringValue ?? null
+}
+
+// ── Slice 0 grouping reads (truth is rules-denied; owner Bearer bypasses rules) ──
+async function readTruthDocs() {
+  const groups = await fsGetDocs('groups')
+  const out = []
+  for (const g of groups) {
+    const gid = g.name.split('/').pop()
+    const t = await fsGetDoc(`groups/${gid}/truth/team`)
+    if (t?.fields) out.push({
+      group_id:        gid,
+      team_number:     numVal(t.fields.team_number),
+      password:        strVal(t.fields.password),
+      cash:            numVal(t.fields.cash),
+      portfolio_value: numVal(t.fields.portfolio_value),
+    })
+  }
+  return out
+}
+async function readLicenses() {
+  const docs = await fsGetDocs('licenses')
+  return docs.map(d => ({
+    id:         d.name.split('/').pop(),
+    owner_team: numVal(d.fields?.owner_team),
+    region:     strVal(d.fields?.region),
+  }))
+}
+async function readMarketState() {
+  const doc = await fsGetDoc('market/state')
+  if (!doc?.fields) return null
+  return {
+    status:                 strVal(doc.fields.status),
+    num_teams:              numVal(doc.fields.num_teams),
+    num_regions:            numVal(doc.fields.num_regions),
+    efficient_market_value: numVal(doc.fields.efficient_market_value),
+  }
+}
+async function readParticipantDoc(pid) {
+  const d = await fsGetDoc(`participants/${pid}`)
+  if (!d?.fields) return null
+  return {
+    team_number:          numVal(d.fields.team_number),
+    team_password:        strVal(d.fields.team_password),
+    team_portfolio_value: numVal(d.fields.team_portfolio_value),
+    group_id:             strVal(d.fields.group_id),
+  }
+}
+async function pollMarketStatus(want, maxMs = 20_000) {
+  const start = Date.now()
+  let ms = await readMarketState()
+  while (Date.now() - start < maxMs) {
+    ms = await readMarketState()
+    if (ms?.status === want) return ms
+    await sleep(600)
+  }
+  return ms
+}
+// Append present filler traders (clear:false → merges presence, keeps UI students).
+async function seedFillers() {
+  const res = await fetch(`${FUNCTIONS}/seedMatchTest`, {
+    method: 'POST', headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      game_instance_id: GID, clear: false,
+      participants: FILLER_PIDS.map(id => ({ id, role: 'trader', present: true })),
+    }),
+  })
+  return res.ok
 }
 
 // ── Student / dashboard URLs (DEV bypasses) ─────────────────────────────────────
@@ -407,9 +480,9 @@ async function main() {
     log('warmup', 'stack warm ✅')
   }
 
-  // ── Launch all students; each drives info → KC → reflection → hold ──
-  banner(`Phase 1 — ${PIDS.length} students: info → KC → reflection → hold (single role)`)
-  for (const pid of PIDS) {
+  // ── Launch the UI students; each drives info → KC → reflection → hold ──
+  banner(`Phase 1 — ${UI_PIDS.length} UI students: info → KC → reflection → hold (single role)`)
+  for (const pid of UI_PIDS) {
     const ctx  = await browser.newContext()
     const page = await ctx.newPage()
     page.setDefaultTimeout(60_000)
@@ -424,14 +497,14 @@ async function main() {
     s.kc   = r.kc
   }))
   const traderCount = students.filter(s => s.role === 'trader').length
-  assert(traderCount === PIDS.length,
-    `Roles assigned — all ${PIDS.length} students launch as the single role \`trader\` (got ${traderCount})`)
+  assert(traderCount === UI_PIDS.length,
+    `Roles assigned — all ${UI_PIDS.length} UI students launch as the single role \`trader\` (got ${traderCount})`)
 
   // ── KC skeleton: gate seen + passed, both statics rendered, options shuffle per student ──
   assert(students.every(s => s.kc?.sawGate),
     `KC — every student saw the role gate ("What is your role in this market?") and passed on the first click`)
   assert(students.every(s => s.kc?.staticsSeen === KC_FIELDS.length),
-    `KC — both placeholder graded questions rendered + submitted for every student (got [${[...new Set(students.map(s => s.kc?.staticsSeen))].join(',')}])`)
+    `KC — both placeholder graded questions rendered + submitted for every UI student (got [${[...new Set(students.map(s => s.kc?.staticsSeen))].join(',')}])`)
   const kcFlat = s => KC_FIELDS.map(f => (s.kc?.orders?.[f] ?? []).join('|')).join(' || ')
   const sA = students.find(s => s.pid === 'stu-3'), sB = students.find(s => s.pid === 'stu-4')
   assert(sA && sB && kcFlat(sA) !== kcFlat(sB),
@@ -456,9 +529,9 @@ async function main() {
   await dash.waitForSelector('h1:has-text("Instructor Dashboard — Spectrum")', { timeout: 60_000 })
   const rosterReady = await dash.waitForSelector('table', { timeout: 30_000 }).then(() => true).catch(() => false)
   let rosterNames = 0
-  for (const pid of PIDS) if (await dash.locator(`text=${pid}`).count() > 0) rosterNames++
-  assert(rosterReady && rosterNames === PIDS.length,
-    `Dashboard — roster visible with all ${PIDS.length} participants (found ${rosterNames}/${PIDS.length})`)
+  for (const pid of UI_PIDS) if (await dash.locator(`text=${pid}`).count() > 0) rosterNames++
+  assert(rosterReady && rosterNames === UI_PIDS.length,
+    `Dashboard — roster visible with all ${UI_PIDS.length} UI participants (found ${rosterNames}/${UI_PIDS.length})`)
 
   // ── Generate attendance code (dashboard UI), read the value, drive attendees to waiting ──
   await dash.click('button:has-text("Generate Code")')
@@ -469,51 +542,103 @@ async function main() {
   await Promise.all(attendees.map(s => driveToWaiting(s, code)))
   log(NOSHOW_PID, '⊘ TRUE NO-SHOW — completed KC, will NOT attend class')
 
-  // ── (5) Match (dashboard UI) → single-role tiling: 4 attendees → [4] ──
-  banner('Match — single-role tiling: 4 attendees → [4] (1 true no-show held back)')
-  await dash.waitForSelector('button:has-text("Match Now"):not([disabled])', { timeout: 30_000 })
-  await dash.click('button:has-text("Match Now")')
-  await pollGroups(gs => gs.length === 1, 30_000)
-  const groups0 = await readGroups()
-  assert(groups0.length === 1, `Matching — exactly 1 group formed (got ${groups0.length})`)
-  const sizes = groups0.map(g => g.traders.length).sort((a, b) => a - b)
-  assert(JSON.stringify(sizes) === JSON.stringify([4]),
-    `Matching — sizes tile to [4] (4 attendees) (got [${sizes.join(',')}])`)
-  const totalPlaced = groups0.reduce((n, g) => n + g.traders.length, 0)
-  assert(totalPlaced === ATTEND_PIDS.length,
-    `Matching — every ATTENDEE placed, no orphans (${totalPlaced}/${ATTEND_PIDS.length})`)
+  // ── Seed 10 present filler traders so grouping has 14 present (UI drove only 4) ──
+  banner('Seed fillers — 10 present traders (stu-6..15) so N=14 has 14 present')
+  assert(await seedFillers(),
+    `Seed — 10 filler present traders appended (clear:false; UI students' presence preserved)`)
 
-  const parts = await pollParticipants(
-    ps => ps.filter(p => p.group_id).length === ATTEND_PIDS.length,
-    30_000,
-  )
+  // ── (5) GROUPING — instructor two-step: Set N=14 → Group Participants (NOT Match Now) ──
+  banner('Grouping — instructor sets N=14, Group Participants → 14 teams generated server-side')
+  await dash.waitForSelector('[data-testid="group-participants"]', { timeout: 30_000 })
+  await dash.fill('[data-testid="num-teams-input"]', String(N_TEAMS))
+  await dash.click('[data-testid="set-num-teams"]')
+  await dash.click('[data-testid="group-participants"]')
+  const groupsG = await pollGroups(gs => gs.length === N_TEAMS, 40_000)
+  assert(groupsG.length === N_TEAMS, `Grouping — exactly ${N_TEAMS} teams formed (got ${groupsG.length})`)
+
+  const truth = await readTruthDocs()
+  assert(truth.length === N_TEAMS, `Grouping — ${N_TEAMS} private (rules-denied) truth docs written (got ${truth.length})`)
+  const teamNums = [...new Set(truth.map(t => t.team_number))].sort((a, b) => a - b)
+  assert(JSON.stringify(teamNums) === JSON.stringify(Array.from({ length: N_TEAMS }, (_, i) => i + 1)),
+    `Grouping — team numbers are exactly 1..${N_TEAMS} (got [${teamNums.join(',')}])`)
+
+  // Cash conservation (invariant 7): Σ team cash === N × startingCash.
+  const totalCash = truth.reduce((n, t) => n + (t.cash ?? 0), 0)
+  assert(totalCash === N_TEAMS * 1000,
+    `Grouping — CASH CONSERVATION: Σ team cash = ${totalCash} === ${N_TEAMS}×1000 (invariant 7)`)
+  // Every team opens at portfolio value 1400.
+  assert(truth.every(t => t.portfolio_value === 1400),
+    `Grouping — every team opens at portfolio value 1400 [${[...new Set(truth.map(t => t.portfolio_value))].join(',')}]`)
+  // Team 7's password is 'Strauss' (positional list) — the named-assertion leg 3 end-to-end.
+  const t7 = truth.find(t => t.team_number === 7)
+  assert(t7?.password === 'Strauss',
+    `Grouping — team 7's password is 'Strauss' (positional list, server-generated) [got ${t7?.password}]`)
+
+  // Endowment / one-owner: 4×N licenses, unique ids, each owned by a team in 1..N.
+  const licenses = await readLicenses()
+  assert(licenses.length === 4 * N_TEAMS,
+    `Grouping — ${4 * N_TEAMS} licenses generated (M regions × 8) (got ${licenses.length})`)
+  const licIds = new Set(licenses.map(l => l.id))
+  assert(licIds.size === licenses.length && licenses.every(l => l.owner_team >= 1 && l.owner_team <= N_TEAMS),
+    `Grouping — every license has exactly ONE owner, all in teams 1..${N_TEAMS} (invariant: one owner)`)
+
+  // Market state: grouped (clock NOT started), N teams, N/2 regions, EMV 24850 (verified).
+  const msGrouped = await readMarketState()
+  assert(msGrouped?.status === 'grouped' && msGrouped.num_teams === N_TEAMS && msGrouped.num_regions === N_TEAMS / 2,
+    `Grouping — market status 'grouped' (clock NOT started), ${N_TEAMS} teams, ${N_TEAMS / 2} regions [${msGrouped?.status}, ${msGrouped?.num_teams}, ${msGrouped?.num_regions}]`)
+  assert(msGrouped?.efficient_market_value === 24850,
+    `Grouping — Efficient Market Value at N=14 = 24850 (closed form, server-computed) [got ${msGrouped?.efficient_market_value}]`)
+
+  // The no-show is held out of grouping; all present traders placed.
+  const parts = await pollParticipants(ps => ps.filter(p => p.group_id).length === PRESENT_PIDS.length, 30_000)
   const byPid = Object.fromEntries(parts.map(p => [p.id, p]))
   assert(byPid[NOSHOW_PID] && byPid[NOSHOW_PID].role === 'trader' && !byPid[NOSHOW_PID].group_id,
-    `Matching — the true no-show ${NOSHOW_PID} has a role but NO group (held out of the match)`)
+    `Grouping — the true no-show ${NOSHOW_PID} has a role but NO team (held out)`)
+  const placed = parts.filter(p => p.group_id).length
+  assert(placed === PRESENT_PIDS.length,
+    `Grouping — all ${PRESENT_PIDS.length} present traders placed into teams, no orphans (${placed}/${PRESENT_PIDS.length})`)
 
-  const matchedGid = groups0[0].id
-  const matchedMembers = students.filter(s => byPid[s.pid]?.group_id === matchedGid)
+  // ── (6) STUDENT DOSSIER — a grouped UI student lands in the market room with their team ──
+  banner('Market room — a grouped student sees Team #, password, Portfolio Value 1400, synergy table')
+  const dossier = students.find(s => s.pid === UI_ATTEND[0]) // stu-1
+  await dossier.page.waitForSelector('[data-testid="market-room"]', { timeout: 30_000 })
+  await dossier.page.waitForSelector('[data-testid="team-number"]', { timeout: 15_000 })
+  const expected = await readParticipantDoc(dossier.pid)
+  const domTeam = (await dossier.page.locator('[data-testid="team-number"]').innerText()).trim()
+  const domPass = (await dossier.page.locator('[data-testid="team-password"]').innerText()).trim()
+  const domPV   = (await dossier.page.locator('[data-testid="portfolio-value"]').innerText()).trim()
+  assert(expected?.team_number != null && domTeam.includes(String(expected.team_number)),
+    `Market room — dossier shows the student's team number (Team ${expected?.team_number}) [DOM "${domTeam}"]`)
+  assert(domPass.length > 0 && domPass === expected?.team_password,
+    `Market room — dossier shows the team password served from the student's OWN doc [DOM "${domPass}"]`)
+  assert(/1,?400/.test(domPV),
+    `Market room — dossier shows Portfolio Value 1400 [DOM "${domPV}"]`)
+  const synergyRows = await dossier.page.locator('[data-testid="synergy-table"] tbody tr').count()
+  assert(synergyRows === N_TEAMS / 2,
+    `Market room — private synergy table renders one row per region (${N_TEAMS / 2}) [got ${synergyRows}]`)
+  assert(expected?.team_portfolio_value === 1400,
+    `Market room — the student's own participant doc carries team_portfolio_value 1400 (server-stamped)`)
+  await dossier.page.reload()
+  const back = await dossier.page.waitForSelector('[data-testid="market-room"]', { timeout: 25_000 }).then(() => true).catch(() => false)
+  assert(back, `Market room — reload lands back on the market room (no dead end / blank page)`)
 
-  // ── (6) matched → MARKET ROOM (no trading UI yet), reload stays coherent ──
-  banner('matched → MARKET ROOM (Phase A placeholder), reload stays coherent')
-  const roomSample = matchedMembers[0]
-  await roomSample.page.waitForSelector('[data-testid="market-room"]', { timeout: 25_000 })
-  const roomBody = await bodyText(roomSample.page)
-  assert(/in the market/i.test(roomBody),
-    `matched — a matched student sees the MARKET ROOM placeholder ("You're in the market")`)
-  await roomSample.page.reload()
-  const roomBack = await roomSample.page.waitForSelector('[data-testid="market-room"]', { timeout: 25_000 }).then(() => true).catch(() => false)
-  assert(roomBack, `matched — reload of a matched student lands back on the market room (no dead end / blank page)`)
+  // ── (7) START MARKET — the second button opens the market and starts the clock ──
+  banner('Start Market — status grouped → open (clock starts)')
+  await dash.waitForSelector('[data-testid="start-market"]', { timeout: 20_000 })
+  await dash.click('[data-testid="start-market"]')
+  const msOpen = await pollMarketStatus('open', 20_000)
+  assert(msOpen?.status === 'open',
+    `Start Market — market status flips 'grouped' → 'open' (clock started) [${msOpen?.status}]`)
 
   // ══════════════ FINALIZE — Score & Record → participation+KC push (POST + 200) ══════════════
   banner('Finalize — Score & Record → participation+KC grading → grade push (POST + 200)')
   await dash.click('button:has-text("Score & Record")')
   const isResult = r => r.result && typeof r.result === 'object' && typeof r.result.participant_id === 'string'
   const start = Date.now()
-  while (mock.received.filter(isResult).length < PIDS.length && Date.now() - start < 30_000) await sleep(500)
+  while (mock.received.filter(isResult).length < ALL_PIDS.length && Date.now() - start < 45_000) await sleep(500)
   const pushed = mock.received.filter(isResult)
   log('push', `mock received ${mock.received.length} request(s); ${pushed.length} are GameResult POSTs`)
-  assert(pushed.length >= PIDS.length,
+  assert(pushed.length >= ALL_PIDS.length,
     `Grade push — the classroom callback received ${pushed.length} GameResult POSTs (one per participant; push fired)`)
   assert(pushed.length > 0 && pushed.every(r => typeof r.result.normalized_score === 'number' || r.result.normalized_score === null),
     `Grade push — every pushed GameResult carries a normalized_score field`)
@@ -522,8 +647,8 @@ async function main() {
 
   const pushedById  = Object.fromEntries(pushed.map(r => [r.result.participant_id, r.result]))
   const pushedPids  = new Set(pushed.map(r => r.result.participant_id))
-  assert(PIDS.every(p => pushedPids.has(p)) && pushedPids.size === PIDS.length,
-    `Grade push — EVERY participant lands in the payload, nobody dropped: ${pushedPids.size}/${PIDS.length} (incl. the no-show)`)
+  assert(ALL_PIDS.every(p => pushedPids.has(p)) && pushedPids.size === ALL_PIDS.length,
+    `Grade push — EVERY participant lands in the payload, nobody dropped: ${pushedPids.size}/${ALL_PIDS.length} (incl. the no-show)`)
 
   // knowledge_check_score rides as its OWN 0–1 field — real varying values.
   assert(pushed.every(r => r.result.knowledge_check_score === null ||
@@ -544,10 +669,10 @@ async function main() {
   // ── Participation: every PRESENT trader has the IDENTICAL flat raw_score → z 0 ──
   const partsFinal  = await readParticipants()
   const byPidFinal  = Object.fromEntries(partsFinal.map(p => [p.id, p]))
-  const present     = partsFinal.filter(p => p.group_id)          // the 4 matched
+  const present     = partsFinal.filter(p => p.group_id)          // the 14 grouped
   const rawSet      = new Set(present.map(p => p.raw_score))
-  assert(present.length === ATTEND_PIDS.length && rawSet.size === 1 && present.every(p => p.raw_score === 1),
-    `Scoring — every present trader has the IDENTICAL flat participation raw_score (=1) [${[...rawSet].join(',')}]`)
+  assert(present.length === PRESENT_PIDS.length && rawSet.size === 1 && present.every(p => p.raw_score === 1),
+    `Scoring — every present trader has the IDENTICAL flat participation raw_score (=1), ${present.length}/${PRESENT_PIDS.length} [${[...rawSet].join(',')}]`)
   assert(present.every(p => p.normalized_score === 0),
     `Scoring — degenerate single-role pool: every present trader normalizes to 0 (SD=0 guard) [${[...new Set(present.map(p => p.normalized_score))].join(',')}]`)
 

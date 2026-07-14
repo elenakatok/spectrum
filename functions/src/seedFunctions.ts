@@ -13,7 +13,9 @@ export const seedMatchTest = onRequest(async (req, res) => {
     return
   }
 
-  const body = (req.body?.data ?? req.body) as { game_instance_id?: unknown; participants?: unknown }
+  const body = (req.body?.data ?? req.body) as {
+    game_instance_id?: unknown; participants?: unknown; clear?: unknown
+  }
 
   if (typeof body.game_instance_id !== 'string' || !body.game_instance_id) {
     res.status(400).json({ error: 'game_instance_id required' })
@@ -24,28 +26,34 @@ export const seedMatchTest = onRequest(async (req, res) => {
     return
   }
 
-  // Spectrum: single role `trader`, composition { trader:4 }
-  type SeedP = { id: string; role: 'trader' }
+  // Spectrum: single role `trader`. `present` (default true) controls RTDB presence, so a
+  // seeded no-show (present:false) is attendance-set but held out of grouping. `clear`
+  // (default true) wipes existing state; pass clear:false to APPEND fillers to a live run
+  // (used by the Slice 0 grouping test — 14 present needed, but the UI drove only a few).
+  type SeedP = { id: string; role: 'trader'; present?: boolean }
   const gameInstanceId = body.game_instance_id
   const participants = body.participants as SeedP[]
+  const clear = body.clear !== false // default true
 
   const db = admin.firestore()
   const rtdb = admin.database()
   const instanceRef = db.collection('game_instances').doc(gameInstanceId)
   const now = Timestamp.now()
 
-  // Clear existing participants and groups for a clean test run.
-  const [existingPs, existingGs] = await Promise.all([
-    instanceRef.collection('participants').get(),
-    instanceRef.collection('groups').get(),
-  ])
-  if (existingPs.size > 0 || existingGs.size > 0) {
-    const clearBatch = db.batch()
-    for (const d of existingPs.docs) clearBatch.delete(d.ref)
-    for (const d of existingGs.docs) clearBatch.delete(d.ref)
-    await clearBatch.commit()
+  if (clear) {
+    // Clear existing participants and groups for a clean test run.
+    const [existingPs, existingGs] = await Promise.all([
+      instanceRef.collection('participants').get(),
+      instanceRef.collection('groups').get(),
+    ])
+    if (existingPs.size > 0 || existingGs.size > 0) {
+      const clearBatch = db.batch()
+      for (const d of existingPs.docs) clearBatch.delete(d.ref)
+      for (const d of existingGs.docs) clearBatch.delete(d.ref)
+      await clearBatch.commit()
+    }
+    await rtdb.ref(`presence/${gameInstanceId}`).remove()
   }
-  await rtdb.ref(`presence/${gameInstanceId}`).remove()
 
   // Seed participant docs and RTDB presence.
   const seedBatch = db.batch()
@@ -59,10 +67,13 @@ export const seedMatchTest = onRequest(async (req, res) => {
       attendance_confirmed_at: now,
       confirmed_ready_at: now,
     })
-    presenceData[p.id] = { online: true, last_seen: now.toMillis() }
+    if (p.present !== false) presenceData[p.id] = { online: true, last_seen: now.toMillis() }
   }
   await seedBatch.commit()
-  await rtdb.ref(`presence/${gameInstanceId}`).set(presenceData)
+  // MERGE presence (update, not set) so appending fillers never wipes UI students' presence.
+  if (Object.keys(presenceData).length > 0) {
+    await rtdb.ref(`presence/${gameInstanceId}`).update(presenceData)
+  }
 
   res.json({ ok: true, seeded: participants.length })
 })

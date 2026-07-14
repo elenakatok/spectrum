@@ -18,7 +18,13 @@ service cloud.firestore {
                       'knowledge_check_score', 'knowledge_check_attempts',
                       'prep_status', 'prep_completed_at', 'debrief_initial_offer',
                       'finalized_at', 'attendance_confirmed_at', 'confirmed_ready_at',
-                      'is_lead', 'participant_id', 'game_instance_id', 'participant_late']);
+                      'is_lead', 'participant_id', 'game_instance_id', 'participant_late',
+                      // Slice 0 team model — server-stamped, never client-writable.
+                      // A student may READ their own team fields (own-doc read above);
+                      // they may not forge them (a forged password would be a forged trade).
+                      'team_number', 'team_password', 'team_synergy',
+                      'team_endowment_regions', 'team_license_ids', 'team_cash',
+                      'team_license_value', 'team_portfolio_value']);
     }
 
     // role_counts is an internal balancing counter — backend only.
@@ -34,16 +40,35 @@ service cloud.firestore {
     }
 
     // Groups are written by the Cloud Function; any authenticated participant
-    // can read them (group contents are not sensitive — names are already
-    // visible to the instructor).
+    // can read them. Group docs carry PUBLIC team identity + license holdings only
+    // (endowments are public, v3 §4). Cash, password, and synergy are NOT here.
     match /game_instances/{instanceId}/groups/{groupId} {
       allow read: if request.auth != null;
       allow write: if false;
     }
 
-    // PHASE A SKELETON: no market subcollections yet. Slices 1–5 add the ledger,
-    // confidential bid maxes, and per-team private synergy/price data — all
-    // server-only (rules-denied), same construction as the group read rule above.
+    // Per-team TRUTH (Slice 0): password + private synergy schedules + cash ledger seed.
+    // Server-only — a leak collapses the game (v3 §3.6, §2.2). Rules do NOT cascade into
+    // subcollections, so the group read rule above does not expose this; deny explicitly.
+    match /game_instances/{instanceId}/groups/{groupId}/truth/{doc} {
+      allow read, write: if false;
+    }
+
+    // License ownership board (Slice 0 endowments; Slice 1 ledger mutates it) — PUBLIC
+    // (v3 §7.1: who holds which licenses is public; prices/cash never are). Server-written.
+    match /game_instances/{instanceId}/licenses/{licenseId} {
+      allow read: if request.auth != null;
+      allow write: if false;
+    }
+
+    // Market lifecycle + clock (status / opened_at / closes_at) — PUBLIC read, server-written.
+    match /game_instances/{instanceId}/market/{doc} {
+      allow read: if request.auth != null;
+      allow write: if false;
+    }
+
+    // Slices 1–5 add the transaction ledger, per-auction sealed bids, and per-team price
+    // data — all server-only (rules-denied), same construction as the truth/ rule above.
 
     // Default deny for everything else.
     match /{document=**} {

@@ -16,6 +16,7 @@ import {
   spacing,
 } from '@mygames/game-ui'
 import type { BootstrapArgs, InfoPageLink } from '@mygames/game-ui'
+import MarketRoom from '../components/MarketRoom'
 
 // ── Phase state ───────────────────────────────────────────────────────────────
 
@@ -329,16 +330,7 @@ export default function Play() {
       )}
 
       {phase.name === 'matched' && (
-        <main data-testid="market-room" style={{ padding: layout.pagePad, maxWidth: layout.contentWidth, margin: '0 auto' }}>
-          <h1 style={{ marginTop: 0 }}>You&apos;re in the market</h1>
-          <p style={{ lineHeight: 1.6, marginBottom: spacing.gapSm }}>
-            You&apos;ve been placed in the market. Trading will begin the moment your
-            instructor opens it — stay on this page and it will open automatically.
-          </p>
-          <p style={{ color: colors.textSecondary }}>
-            Keep this tab open. When the market opens you&apos;ll see your portfolio and be able to trade.
-          </p>
-        </main>
+        <MarketRoom participantId={participantId} gameInstanceId={gameInstanceId} />
       )}
     </div>
   )

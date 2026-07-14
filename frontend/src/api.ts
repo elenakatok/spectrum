@@ -112,8 +112,38 @@ export const generateAttendanceCode = () =>
 export const getRoster = () =>
   callFn<{ ok: boolean; participants: RosterParticipant[]; groups: RosterGroup[] }>('getRoster', {})
 
-export const triggerMatching = () =>
-  callFn<{ ok: boolean; groups: unknown[]; alreadyMatched?: boolean }>('triggerMatching', {})
+// ── Spectrum grouping (Slice 0) — instructor two-step flow ────────────────────
+// Replaces the shared rolling matcher. Auth travels as the instructor Bearer token
+// (SDK auto-attaches once the dashboard session is established) — no gid on the client.
+
+export type GroupParticipantsResult = {
+  ok: boolean
+  num_teams: number
+  num_regions: number
+  teams_created: number
+  efficient_market_value: number | null
+  alreadyGrouped?: boolean
+}
+
+export type MarketState = {
+  ok: boolean
+  status: 'setup' | 'grouped' | 'open' | 'closed' | string
+  num_teams?: number | null
+  num_regions?: number | null
+  efficient_market_value?: number | null
+  total_initial_value?: number | null
+  opened_at?: number | null
+  closes_at?: number | null
+}
+
+export const groupParticipants = (numTeams: number) =>
+  callFn<GroupParticipantsResult>('groupParticipants', { num_teams: numTeams })
+
+export const startMarket = () =>
+  callFn<{ ok: boolean; alreadyStarted: boolean; opened_at: number | null; closes_at: number | null }>('startMarket', {})
+
+export const getMarketState = () =>
+  callFn<MarketState>('getMarketState', {})
 
 export const finalizeInstance = () =>
   callFn<{ ok: boolean }>('finalizeInstance', {})

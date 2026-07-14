@@ -1,4 +1,4 @@
-import { onRequest } from 'firebase-functions/v2/https'
+import { onRequest, onCall, HttpsError } from 'firebase-functions/v2/https'
 import * as admin from 'firebase-admin'
 import {
   makeGetInstructorSession,
@@ -9,7 +9,6 @@ import {
   makeVerifyAttendanceCode,
   makeGetRoster,
   makeSyncRoster,
-  makeTriggerMatching,
   makeStartNegotiation,
   makeSubmitLeadOutcome,
   makeSubmitConfirmation,
@@ -25,6 +24,7 @@ import {
   makeGetInfoUrls,
 } from '@mygames/game-server'
 import { spectrumGameDef } from './gameDefinition'
+import { makeGroupParticipants, makeStartMarket, makeGetMarketState } from './grouping'
 
 admin.initializeApp()
 
@@ -47,7 +47,23 @@ export const generateAttendanceCode = makeGenerateAttendanceCode(spectrumGameDef
 export const verifyAttendanceCode   = makeVerifyAttendanceCode(spectrumGameDef)
 export const getRoster              = makeGetRoster(spectrumGameDef)
 export const syncRoster             = makeSyncRoster(spectrumGameDef)
-export const triggerMatching            = makeTriggerMatching(spectrumGameDef)
+// ── Spectrum grouping (Slice 0) — REPLACES the shared rolling matcher ──────────
+// Instructor-driven, two-step, two transactions (v3 §9.1 + Slice 0 addenda):
+//   groupParticipants → partition N teams + generate synergies/endowments/passwords
+//   startMarket       → open the market and start the clock
+export const groupParticipants          = makeGroupParticipants(spectrumGameDef)
+export const startMarket                = makeStartMarket(spectrumGameDef)
+export const getMarketState             = makeGetMarketState(spectrumGameDef)
+
+// Guard: the shared dashboard's "Match Now" button is hidden by the Spectrum grouping
+// panel, but if it is ever reached it must NOT run the rolling matcher (which would tile
+// random {trader:4} groups with no synergies). Fail loud, pointing to the right flow.
+export const triggerMatching = onCall({ cors: spectrumGameDef.corsOrigins }, async () => {
+  throw new HttpsError(
+    'failed-precondition',
+    'Spectrum forms teams via the instructor "Group Participants" button, not "Match Now".',
+  )
+})
 export const startNegotiation           = makeStartNegotiation(spectrumGameDef)
 export const submitLeadOutcome          = makeSubmitLeadOutcome(spectrumGameDef)
 export const submitConfirmation         = makeSubmitConfirmation(spectrumGameDef)

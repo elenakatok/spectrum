@@ -90,7 +90,10 @@ export const spectrumGameDef: GameDefinition = {
   game_id: 'spectrum',
   roles:   spectrumConfig,
   scoreSense: spectrumScoreSense,
-  // PLACEHOLDER composition — Slice 0 replaces with the real team model.
+  // composition is now VESTIGIAL for grouping: Slice 0 replaced the shared rolling
+  // matcher with the instructor-driven `groupParticipants` callable (N teams, variable
+  // size). It is retained only because the shared roster/scoring pipeline reads it for
+  // single-role z-pooling; it no longer governs how teams are formed.
   composition: { trader: 4 },
   outcomeSchema: spectrumSchema,
   computeRawScore,
@@ -107,10 +110,17 @@ export const spectrumGameDef: GameDefinition = {
   // deadlockThreshold omitted → 5
 
   // Settings page config fields (ONE role — `trader`). PLACEHOLDER defaults.
+  // Market parameters are stored as config data objects (NOT inline constants) so the
+  // future admin-defaults screen stays a small addition. N (numTeams) is NOT here — it
+  // is chosen on the instructor dashboard at grouping time (v3 §1, Slice 0 §2).
   configFields: [
     { key: 'trader_role_name', kind: 'string', default: 'Trader' },
     // ONE shared case/instructions PDF placeholder. Real role material arrives later.
     { key: 'trader_sheet_url', kind: 'url', default: '/role-info/spectrum.pdf' },
+    // Market parameters (game-creation defaults; read by groupParticipants / startMarket).
+    { key: 'market_duration_minutes',  kind: 'positiveInt', default: 90 },
+    { key: 'auction_duration_minutes', kind: 'positiveInt', default: 4 },
+    { key: 'starting_cash',            kind: 'positiveInt', default: 1000 },
   ],
 
   // Info page links — keys must appear in configFields above.
