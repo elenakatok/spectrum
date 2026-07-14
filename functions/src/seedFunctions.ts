@@ -1,6 +1,7 @@
 import { onRequest } from 'firebase-functions/v2/https'
 import * as admin from 'firebase-admin'
 import { Timestamp } from 'firebase-admin/firestore'
+import { regionOfLicenseId, portfolioValueFor, type SynergyRow } from './ledgerCore'
 
 // Emulator-only: seed participants and RTDB presence for triggerMatching tests.
 export const seedMatchTest = onRequest(async (req, res) => {
@@ -158,4 +159,131 @@ export const seedGroupForTest = onRequest(async (req, res) => {
   await batch.commit()
 
   res.json({ ok: true, group_id: groupId, lead_id: leadId })
+})
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Emulator-only: seed a precise LEDGER state for the Slice 1 concurrency suite.
+// Full control over teams (cash/escrow/holdings/password/synergy), the license board,
+// and optional auctions + sealed bids. Flat schedule-1 synergy by default (value = 100
+// per license) so portfolios are trivially checkable; pass explicit synergy to override.
+// ─────────────────────────────────────────────────────────────────────────────
+interface SeedTeam {
+  team_number: number
+  members?: string[]
+  cash: number
+  escrowed?: number
+  password: string
+  synergy?: SynergyRow[]
+}
+interface SeedLicense { id: string; region: string; region_index?: number; owner_team: number; under_auction?: string | null }
+interface SeedAuction { id: string; region: string; quantity: number; seller_team: number; reserve: number; license_ids: string[]; ends_at_ms: number; status?: string }
+interface SeedBid { auction_id: string; team_number: number; amount: number; at_ms: number; acted_by?: string }
+
+export const seedLedgerTest = onRequest(async (req, res) => {
+  if (process.env.FUNCTIONS_EMULATOR !== 'true') { res.status(404).json({ error: 'Not found' }); return }
+  if (req.method !== 'POST') { res.status(405).json({ error: 'Method not allowed' }); return }
+
+  const body = (req.body?.data ?? req.body) as {
+    game_instance_id?: string
+    market_status?: string
+    teams?: SeedTeam[]
+    licenses?: SeedLicense[]
+    auctions?: SeedAuction[]
+    bids?: SeedBid[]
+  }
+  if (typeof body.game_instance_id !== 'string' || !body.game_instance_id) {
+    res.status(400).json({ error: 'game_instance_id required' }); return
+  }
+  const gid = body.game_instance_id
+  const teams = body.teams ?? []
+  const licenses = body.licenses ?? []
+  const auctions = body.auctions ?? []
+  const bids = body.bids ?? []
+
+  const db = admin.firestore()
+  const instanceRef = db.collection('game_instances').doc(gid)
+
+  // Clear everything under the instance we manage (participants, groups incl. truth,
+  // licenses, auctions incl. bids, transactions, market).
+  const subcols = ['participants', 'groups', 'licenses', 'auctions', 'transactions', 'market']
+  for (const c of subcols) {
+    const snap = await instanceRef.collection(c).get()
+    for (const d of snap.docs) {
+      // delete known subcollections first (truth under groups, bids under auctions)
+      for (const sub of ['truth', 'bids']) {
+        const ss = await d.ref.collection(sub).get()
+        const b = db.batch()
+        ss.docs.forEach((x) => b.delete(x.ref))
+        if (ss.size) await b.commit()
+      }
+    }
+    const b = db.batch()
+    snap.docs.forEach((d) => b.delete(d.ref))
+    if (snap.size) await b.commit()
+  }
+
+  // Default flat synergy: schedule 1 (value = 100 per license) over every region present.
+  const allRegions = [...new Set(licenses.map((l) => l.region))].sort()
+  const flatSynergy: SynergyRow[] = allRegions.map((region) => ({
+    region, schedule: 1, values: [100, 200, 300, 400, 500, 600, 700, 800],
+  }))
+
+  const licenseIdsOf = (team: number) => licenses.filter((l) => l.owner_team === team).map((l) => l.id).sort()
+
+  const batch = db.batch()
+  const now = Timestamp.now()
+
+  for (const t of teams) {
+    const groupId = `team-${t.team_number}`
+    const members = t.members ?? [`p-${t.team_number}`]
+    const held = licenseIdsOf(t.team_number)
+    const synergy = t.synergy ?? flatSynergy
+    batch.set(instanceRef.collection('groups').doc(groupId), {
+      group_id: groupId, game_instance_id: gid, team_number: t.team_number,
+      trader_participants: members, lead_participant_id: members[0] ?? null,
+      outcome: null, status: 'matched', matched_at: now, license_ids: held,
+    })
+    batch.set(instanceRef.collection('groups').doc(groupId).collection('truth').doc('team'), {
+      team_number: t.team_number, password: t.password, synergy,
+      cash: t.cash, escrowed: t.escrowed ?? 0, license_ids: held,
+      portfolio_value: portfolioValueFor(t.cash, held, synergy),
+    })
+    for (const pid of members) {
+      batch.set(instanceRef.collection('participants').doc(pid), {
+        participant_id: pid, game_instance_id: gid, role: 'trader',
+        group_id: groupId, is_lead: pid === members[0], team_number: t.team_number,
+        attendance_confirmed_at: now,
+      })
+    }
+  }
+
+  for (const l of licenses) {
+    batch.set(instanceRef.collection('licenses').doc(l.id), {
+      license_id: l.id, region: l.region,
+      region_index: l.region_index ?? (l.region.charCodeAt(0) - 64),
+      owner_team: l.owner_team, under_auction: l.under_auction ?? null,
+    })
+  }
+
+  for (const a of auctions) {
+    batch.set(instanceRef.collection('auctions').doc(a.id), {
+      auction_id: a.id, region: a.region, quantity: a.quantity, seller_team: a.seller_team,
+      reserve: a.reserve, license_ids: a.license_ids, status: a.status ?? 'open',
+      ends_at: Timestamp.fromMillis(a.ends_at_ms), winner_team: null, clearing_price: null,
+    })
+  }
+  for (const bid of bids) {
+    batch.set(instanceRef.collection('auctions').doc(bid.auction_id).collection('bids').doc(`team-${bid.team_number}`), {
+      team_number: bid.team_number, amount: bid.amount, at: bid.at_ms, acted_by: bid.acted_by ?? `p-${bid.team_number}`,
+    })
+  }
+
+  batch.set(instanceRef.collection('market').doc('state'), {
+    status: body.market_status ?? 'open', num_teams: teams.length,
+    num_regions: allRegions.length, starting_cash: 1000,
+  })
+
+  await batch.commit()
+  void regionOfLicenseId
+  res.json({ ok: true, teams: teams.length, licenses: licenses.length, auctions: auctions.length, bids: bids.length })
 })

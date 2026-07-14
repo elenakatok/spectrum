@@ -67,8 +67,24 @@ service cloud.firestore {
       allow write: if false;
     }
 
-    // Slices 1–5 add the transaction ledger, per-auction sealed bids, and per-team price
-    // data — all server-only (rules-denied), same construction as the truth/ rule above.
+    // Transaction ledger (Slice 1) — append-only, carries PRICES → server-only. The
+    // History tab (Slice 3) serves a team its OWN transactions via a callable; direct
+    // client reads are denied so no team can see another's prices (v3 §7.1).
+    match /game_instances/{instanceId}/transactions/{txId} {
+      allow read, write: if false;
+    }
+
+    // Auctions (Slice 1 settle primitive; Slice 2 lifecycle). The doc carries the PRIVATE
+    // reserve, so it is server-only; the public live-auction feed (region/quantity, no
+    // reserve, no price) is served separately in Slice 2. Bids are rules-denied until close.
+    match /game_instances/{instanceId}/auctions/{auctionId} {
+      allow read, write: if false;
+    }
+    match /game_instances/{instanceId}/auctions/{auctionId}/bids/{bidId} {
+      allow read, write: if false;
+    }
+
+    // Slices 2–5 add per-team price data and the RTDB public feeds — all server-only.
 
     // Default deny for everything else.
     match /{document=**} {

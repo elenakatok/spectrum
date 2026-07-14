@@ -25,6 +25,7 @@ import {
 } from '@mygames/game-server'
 import { spectrumGameDef } from './gameDefinition'
 import { makeGroupParticipants, makeStartMarket, makeGetMarketState } from './grouping'
+import { makeExecuteDeal, makeExecuteSwap, makeSettleAuction } from './ledger'
 
 admin.initializeApp()
 
@@ -54,6 +55,11 @@ export const syncRoster             = makeSyncRoster(spectrumGameDef)
 export const groupParticipants          = makeGroupParticipants(spectrumGameDef)
 export const startMarket                = makeStartMarket(spectrumGameDef)
 export const getMarketState             = makeGetMarketState(spectrumGameDef)
+
+// ── Ledger core (Slice 1) — the three transactional market mutations ──────────
+export const executeDeal                = makeExecuteDeal(spectrumGameDef)
+export const executeSwap                = makeExecuteSwap(spectrumGameDef)
+export const settleAuction              = makeSettleAuction(spectrumGameDef)
 
 // Guard: the shared dashboard's "Match Now" button is hidden by the Spectrum grouping
 // panel, but if it is ever reached it must NOT run the rolling matcher (which would tile
@@ -96,4 +102,4 @@ export const health = onRequest((req, res) => {
 })
 
 // Emulator-only dev seed functions — onRequest, not game endpoints.
-export { seedMatchTest, seedGroupForTest } from './seedFunctions'
+export { seedMatchTest, seedGroupForTest, seedLedgerTest } from './seedFunctions'
