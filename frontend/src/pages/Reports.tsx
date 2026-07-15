@@ -37,7 +37,7 @@ const signed = (n: number) => `${n >= 0 ? '+' : '−'}${money(Math.abs(n))}`
 const elapsed = (atMs: number | null, openedAt: number | null) =>
   atMs != null && openedAt != null ? clock(Math.max(0, atMs - openedAt)) : '—'
 
-const th: CSSProperties = { border: '1px solid #d0d7de', padding: '0.4rem 0.6rem', background: '#f6f8fa', textAlign: 'right', whiteSpace: 'nowrap' }
+const th: CSSProperties = { border: '1px solid #d0d7de', padding: '0.4rem 0.6rem', background: '#f6f8fa', textAlign: 'right', whiteSpace: 'nowrap', position: 'sticky', top: 0, zIndex: 1 }
 const thL: CSSProperties = { ...th, textAlign: 'left' }
 const td: CSSProperties = { border: '1px solid #d0d7de', padding: '0.4rem 0.6rem', textAlign: 'right', fontVariantNumeric: 'tabular-nums' }
 const tdL: CSSProperties = { ...td, textAlign: 'left', fontVariantNumeric: 'normal' }
@@ -148,10 +148,12 @@ function HistoryReport({ graph }: { graph: TxGraph }) {
         The full price ledger — every settled deal, auction, and swap, with prices, quantities, and elapsed-time
         stamps. This report is <strong>instructor-only</strong>: there is no student path to the cross-team price stream.
       </p>
-      <div style={{ border: '1px solid #e2e8f0', borderRadius: 8, padding: '0.5rem', marginBottom: '1rem' }}>
+      {/* The graph is secondary to the ledger here — cap its footprint so the table below always
+          gets a visible, scrollable region (the graph scales down; on the /market view it's full size). */}
+      <div style={{ border: '1px solid #e2e8f0', borderRadius: 8, padding: '0.5rem', marginBottom: '1rem', maxWidth: 560, margin: '0 auto 1rem' }}>
         <TransactionGraph points={graph.points} openedAt={graph.opened_at} nowMs={now} />
       </div>
-      <div style={{ overflowX: 'auto', maxHeight: '40vh', border: '1px solid #ddd', borderRadius: 6 }}>
+      <div style={{ overflow: 'auto', maxHeight: '42vh', minHeight: 180, border: '1px solid #ddd', borderRadius: 6 }}>
         <table style={{ borderCollapse: 'collapse', fontSize: '0.85rem', width: '100%' }} data-testid="report-history-table">
           <thead>
             <tr>

@@ -1,5 +1,5 @@
 /**
- * Spectrum SLICE 3+4+6 — PRODUCTION smoke + student-tab, instructor-view & REPORTS screenshots.
+ * Spectrum SLICE 3+4+6+7 — PRODUCTION smoke + student-tab, instructor-view & REPORTS screenshots.
  *
  * Drives the DEPLOYED spectrum.mygames.live against the DEPLOYED callables, then captures the
  * five student tabs AND the five Slice-4 instructor views. Faithful path (no emulator): admin-seed
@@ -494,9 +494,20 @@ async function main() {
     ok((rep.transactions ?? []).some((t) => t.type === 'deal' && t.acted_by_name),
       'getMarketReport Report 4: the attributed ledger carries deals with team identity + actor name')
 
+    // A projector-height viewport so the modal renders tall enough to prove Report 2's table body
+    // scrolls into view (Slice-7 cleanup 2), not just the header, in the fullPage screenshot.
+    await instr.setViewportSize({ width: 1280, height: 1500 })
     await instr.goto(`${BASE}/reports?token=${instrToken}&game_instance_id=${GID}&_session=tab`)
     await instr.locator('[data-testid="report-tiles"]').waitFor({ timeout: 45_000 })
     await sleep(5000)   // let getReportData/getLeaderboard/getTransactionGraph/getMarketReport resolve
+
+    // Slice-7 cleanup 1: the Phase-A placeholder prep tile is GONE — the overview shows exactly the
+    // five real reports and no "No responses yet" free-text card.
+    const tileCount = await instr.locator('[data-testid^="report-tile-"]').count()
+    const overviewText = await instr.locator('[data-testid="report-tiles"]').innerText().catch(() => '')
+    ok(tileCount === 5 && !/PLACEHOLDER|No responses yet|going-in strategy/i.test(overviewText),
+      `Reports overview shows exactly the 5 real reports, no placeholder free-text tile (${tileCount} tiles)`)
+
     await instr.screenshot({ path: path.join(SHOT_DIR, 'reports-overview.png'), fullPage: true })
     log('  📸 reports overview')
 
@@ -510,7 +521,17 @@ async function main() {
       await sleep(700)
     }
     await openReport('leaderboard', 'report-leaderboard', '1-leaderboard')
-    await openReport('history', 'report-history', '2-history')
+    // Slice-7 cleanup 2: Report 2's transaction table body must render + be visible (not clipped
+    // under the graph). Open it, assert the first ledger ROW is visible, then screenshot.
+    await instr.locator('[data-testid="report-tile-history"] button').click().catch(() => {})
+    await instr.locator('[data-testid="report-history-table"]').waitFor({ timeout: 15_000 }).catch(() => {})
+    await sleep(1500)
+    const rowVisible = await instr.locator('[data-testid="report-history-row-0"]').isVisible().catch(() => false)
+    ok(rowVisible, 'Report 2 transaction table renders its rows (first ledger row visible in the modal, not just the header)')
+    await instr.screenshot({ path: path.join(SHOT_DIR, 'reports-2-history.png'), fullPage: true })
+    log('  📸 report 2-history')
+    await instr.locator('button:has-text("✕")').first().click().catch(() => {})
+    await sleep(700)
     await openReport('regions', 'report-regions', '3-regions')      // ← the focus
     // Report 3 assertion on the RENDERED page: the gap-0 consolidated region row is present.
     await instr.locator('[data-testid="report-tile-regions"] button').click().catch(() => {})

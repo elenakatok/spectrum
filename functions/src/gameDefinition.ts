@@ -298,13 +298,9 @@ export const spectrumGameDef: GameDefinition = {
       ],
       'A common hybrid auctions to identify finalists, then negotiates with them. (Confidentiality favors negotiation, not auctions; negotiation can reduce certain risks even though it is slower.)'),
 
-    // ── Ungraded reflection (participation only) ──────────────────────────────────
-    {
-      field: 'prep_trader_reflection', type: 'text', system: false,
-      category: 'preparation', format: 'text', role_target: 'trader',
-      prompt: 'Before the market opens: what is your going-in strategy — which regions will you try to build blocks in, and will you lean on negotiation or auctions?',
-      placeholder: '', order: 20, hidden: false, deletable: true,
-    },
+    // Spectrum has NO free-text prep question — the debrief lives entirely in the five market
+    // reports (v3 §13). The former `prep_trader_reflection` reflection was removed in Slice 7:
+    // it surfaced as an empty "No responses yet" card on the Reports overview (Slice-6 review).
   ],
 
   // Legacy stub fields — must be present but content served via prepDefaults above.

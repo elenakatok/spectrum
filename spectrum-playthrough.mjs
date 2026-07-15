@@ -301,7 +301,7 @@ const studentUrl   = pid => `${FE}/?_pid=${pid}&_gid=${GID}&_session=tab`
 const dashboardUrl = () => `${FE}/dashboard?_dev_game_instance_id=${encodeURIComponent(GID)}&_session=tab`
 const bodyText     = page => page.locator('body').innerText()
 
-// ── Phase 1: info → KC gate → graded MC → reflection → hold (per student) ───────
+// ── Phase 1: info → KC gate → graded MC → hold (per student) ───────
 
 // assignRole runs a Firestore transaction on ONE shared role_counts doc; the emulator locks
 // pessimistically, so concurrent assignRole calls cascade into lock-timeouts. So role
@@ -360,11 +360,9 @@ async function driveSetup(page, pid) {
   // KC skeleton — single-option role gate + 2 placeholder graded statics.
   const kc = await driveKnowledgeCheck(page, pid, kcPlanFor(pid))
 
-  // Reflection (ungraded, category 'preparation') — PrepQuestions phase.
-  await page.waitForSelector('textarea', { timeout: 30_000 })
-  await page.locator('textarea').fill(`Trader plan: build synergy in my strong regions, trade for the rest.`)
-  await page.click('button:has-text("Complete")')
-
+  // Spectrum has NO free-text prep question (the reflection was removed in Slice 7). With zero
+  // prep questions the shared PrepQuestions auto-completes prep (calls completePrep, sets
+  // prep_status='complete') and advances straight to the hold screen — no textarea step.
   await page.waitForSelector('h1:has-text("Preparation complete")', { timeout: 30_000 })
   log(pid, '◆ hold screen')
   return { page, pid, role: 'trader', kc }
@@ -501,8 +499,8 @@ async function main() {
     log('warmup', 'stack warm ✅')
   }
 
-  // ── Launch the UI students; each drives info → KC → reflection → hold ──
-  banner(`Phase 1 — ${UI_PIDS.length} UI students: info → KC → reflection → hold (single role)`)
+  // ── Launch the UI students; each drives info → KC → hold ──
+  banner(`Phase 1 — ${UI_PIDS.length} UI students: info → KC → hold (single role)`)
   for (const pid of UI_PIDS) {
     const ctx  = await browser.newContext()
     const page = await ctx.newPage()
@@ -511,7 +509,7 @@ async function main() {
   }
   // Step 1 — assign roles SEQUENTIALLY (no role_counts lock-timeout contention).
   for (const s of students) await ensureOnRolePage(s.page, s.pid)
-  // Step 2 — drive info assert → KC → reflection → hold CONCURRENTLY (per-participant writes only).
+  // Step 2 — drive info assert → KC → hold CONCURRENTLY (per-participant writes only).
   await Promise.all(students.map(async s => {
     const r = await driveSetup(s.page, s.pid)
     s.role = r.role
