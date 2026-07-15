@@ -132,6 +132,40 @@ export type TeamDirectoryEntry = { team_number: number; member_names: string[] }
 export const getTeamsDirectory = () =>
   callFn<{ ok: boolean; teams: TeamDirectoryEntry[] }>('getTeamsDirectory', {})
 
+// ── Instructor read-paths (Slice 4) — the dashboard's five views ─────────────────────
+// SDK auto-attaches the instructor Firebase Bearer once the dashboard session exists. These
+// two are the only reads that expose data across ALL teams — instructor-authed by design.
+
+export type LeaderboardTeam = {
+  team_number: number
+  cash: number
+  license_value: number
+  portfolio_value: number
+}
+export type Leaderboard = {
+  ok: boolean
+  teams: LeaderboardTeam[]        // ranked by portfolio_value, descending
+  value_after_trade: number       // Σ portfolio across teams
+  total_initial_value: number
+  efficient_market_value: number
+}
+export const getLeaderboard = () => callFn<Leaderboard>('getLeaderboard', {})
+
+export type GraphPoint = {
+  type: 'deal' | 'swap' | 'auction' | string
+  region: string | null
+  quantity: number | null
+  price: number | null
+  price_per_license: number | null   // null for swaps (drawn on a price-less strip)
+  at_ms: number | null
+}
+export type TransactionGraph = {
+  ok: boolean
+  opened_at: number | null
+  points: GraphPoint[]
+}
+export const getTransactionGraph = () => callFn<TransactionGraph>('getTransactionGraph', {})
+
 // ── Instructor API ────────────────────────────────────────────────────────────
 
 export type InstructorSessionArgs =

@@ -28,6 +28,7 @@ import { makeGroupParticipants, makeStartMarket, makeGetMarketState } from './gr
 import { makeExecuteDeal, makeExecuteSwap, makeSettleAuction } from './ledger'
 import { makeCreateAuction, makePlaceBid, makeGetAuctionState, settleAuctionTask } from './auctionLifecycle'
 import { makeGetTeamState, makeGetTeamHistory, makeGetTeamsDirectory } from './studentReads'
+import { makeGetLeaderboard, makeGetTransactionGraph } from './instructorReads'
 
 admin.initializeApp()
 
@@ -73,6 +74,12 @@ export { settleAuctionTask }
 export const getTeamState               = makeGetTeamState(spectrumGameDef)
 export const getTeamHistory             = makeGetTeamHistory(spectrumGameDef)
 export const getTeamsDirectory          = makeGetTeamsDirectory(spectrumGameDef)
+
+// ── Instructor read-paths (Slice 4) — read-only; the dashboard's five views ───
+//   getLeaderboard        → View 1 Team Performance (per-team financials + aggregates)
+//   getTransactionGraph   → View 3 Transaction Graph (all prices — INSTRUCTOR ONLY)
+export const getLeaderboard             = makeGetLeaderboard(spectrumGameDef)
+export const getTransactionGraph        = makeGetTransactionGraph(spectrumGameDef)
 
 // Guard: the shared dashboard's "Match Now" button is hidden by the Spectrum grouping
 // panel, but if it is ever reached it must NOT run the rolling matcher (which would tile

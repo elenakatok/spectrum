@@ -168,9 +168,17 @@ function GroupingPanel() {
       )}
 
       {open && (
-        <div style={{ fontSize: '0.9rem', color: '#137333', fontWeight: 600 }}>
-          ● Market open — {state?.num_teams} teams · {state?.num_regions} regions
-          {state?.closes_at ? ` · closes at ${new Date(state.closes_at).toLocaleTimeString()}` : ''}
+        <div style={{ display: 'flex', alignItems: 'center', gap: '0.9rem', flexWrap: 'wrap' }}>
+          <span style={{ fontSize: '0.9rem', color: '#137333', fontWeight: 600 }}>
+            ● Market open — {state?.num_teams} teams · {state?.num_regions} regions
+            {state?.closes_at ? ` · closes at ${new Date(state.closes_at).toLocaleTimeString()}` : ''}
+          </span>
+          {/* The live projector dashboard is a separate route; carry the same launch token
+              (?token=&game_instance_id= or the DEV bypass) straight through its query string. */}
+          <a data-testid="open-live-market" href={`/market${window.location.search}`}
+            style={{ fontSize: '0.9rem', fontWeight: 600, color: '#D38626' }}>
+            Open live market dashboard →
+          </a>
         </div>
       )}
 

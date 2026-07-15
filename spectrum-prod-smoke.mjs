@@ -1,12 +1,14 @@
 /**
- * Spectrum SLICE 3 — PRODUCTION smoke + five-tab screenshots.
+ * Spectrum SLICE 3+4 — PRODUCTION smoke + student-tab & instructor-view screenshots.
  *
  * Drives the DEPLOYED spectrum.mygames.live against the DEPLOYED callables, then captures the
- * five student tabs. Faithful path (no emulator): admin-seed 14 test participants on a course-ABC
- * test instance to a groupable state, drive the REAL instructor grouping panel + Start Market in a
- * real browser (→ real groupParticipants/startMarket), do one real deal (→ real executeDeal), load a
- * grouped student via a real classroom-signed JWT (→ real assignRole → getTeamState/History/Directory/
- * getAuctionState), screenshot all five tabs, then RESTORE the instance to bare.
+ * five student tabs AND the five Slice-4 instructor views. Faithful path (no emulator): admin-seed
+ * 14 test participants on a course-ABC test instance to a groupable state, drive the REAL instructor
+ * grouping panel + Start Market in a real browser (→ real groupParticipants/startMarket), do one real
+ * deal (→ real executeDeal), load a grouped student via a real classroom-signed JWT (→ real assignRole
+ * → getTeamState/History/Directory/getAuctionState), screenshot all five student tabs, then open the
+ * instructor /market route (→ real getLeaderboard/getTransactionGraph/getRoster) and screenshot all
+ * five projector views, then RESTORE the instance to bare.
  *
  * Reads/writes ONLY a course-ABC test instance; signs tokens with the classroom key (same as the
  * launcher). Requires ADC (gcloud application-default) + classroom/scripts/game-jwt-private.pem.
@@ -115,8 +117,9 @@ async function main() {
   const browser = await chromium.launch({ headless: !HEADED })
   try {
     // ── Instructor: real grouping panel + Start Market against prod hosting ──
+    const instrToken = signToken('instructor', 'smoke-instr', 'Smoke Instructor')
     const instr = await browser.newPage()
-    await instr.goto(`${BASE}/dashboard?token=${signToken('instructor', 'smoke-instr', 'Smoke Instructor')}&game_instance_id=${GID}&_session=tab`)
+    await instr.goto(`${BASE}/dashboard?token=${instrToken}&game_instance_id=${GID}&_session=tab`)
     await instr.locator('[data-testid="num-teams-input"]').waitFor({ timeout: 40_000 })
     await instr.locator('[data-testid="num-teams-input"]').fill(String(N_TEAMS))
     await instr.locator('[data-testid="set-num-teams"]').click()
@@ -174,10 +177,33 @@ async function main() {
     await stu.locator(`[data-testid="deal-submit-${dealRegion}"]`).click()
     await sleep(4000) // onActed refresh (getTeamState/History) after the deal
 
-    // ── Capture the five tabs ──
-    console.log('\n  Capturing the five tabs:')
+    // ── Capture the five student tabs ──
+    console.log('\n  Capturing the five student tabs:')
     for (const tab of ['general', 'ownership', 'teams', 'transactions', 'history']) await shoot(stu, tab, `team${meTeam}-${tab}`)
-    ok(true, 'five prod tab screenshots captured')
+    ok(true, 'five prod student tab screenshots captured')
+
+    // ── Instructor live-market dashboard (Slice 4) — the SEPARATE /market route, its own
+    //    session bootstrap (same instructor JWT). Capture all five projector views. ──
+    console.log('\n  Capturing the five INSTRUCTOR views:')
+    await instr.goto(`${BASE}/market?token=${instrToken}&game_instance_id=${GID}&_session=tab`)
+    await instr.locator('[data-testid="instructor-market"]').waitFor({ timeout: 45_000 })
+    await sleep(4000) // let getLeaderboard / licenses onSnapshot resolve before the first shot
+    // Sanity: the leaderboard header must show the efficient benchmark (24850 at N=14).
+    await instr.locator('[data-testid="nav-performance"]').click()
+    for (let i = 0; i < 20; i++) {
+      if (await instr.locator('[data-testid="leaderboard-table"]').count()) break
+      await sleep(750)
+    }
+    const perfText = await instr.locator('[data-testid="instructor-market"]').innerText().catch(() => '')
+    ok(/24[,.]?850/.test(perfText), `instructor Team Performance shows Efficient Market Value 24,850 (${ms?.efficient_market_value})`)
+    for (const view of ['performance', 'ownership', 'graph', 'teams', 'quiz']) {
+      await instr.locator(`[data-testid="nav-${view}"]`).click().catch(() => {})
+      await sleep(2500)
+      const file = path.join(SHOT_DIR, `instructor-${view}.png`)
+      await instr.screenshot({ path: file, fullPage: true })
+      log(`  📸 ${view} → ${file}`)
+    }
+    ok(true, 'five prod instructor view screenshots captured')
   } finally {
     await browser.close().catch(() => {})
     if (!KEEP) await restore(pids)

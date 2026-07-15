@@ -12,6 +12,9 @@
  *   LEG 4  the auction reserve appears to NOBODY (not bidders, not counterparties, not seller)
  *   LEG 5  the Teams roster is unreachable from an UNAUTHENTICATED session
  *   LEG 6  a losing bidder learns they lost but NOT the clearing price, and not the other bids
+ *   LEG 7  the Slice-4 instructor surfaces (transaction graph + leaderboard) are INSTRUCTOR
+ *          ONLY BY CONSTRUCTION (v3 §13.1) — a student session is rejected by both reads;
+ *          the projector Ownership view reuses the students' component, never a fork
  *
  * Modelled on eBay's "2650" leak-check (games/ebay/ebay-playthrough.mjs): DOM innerText walk
  * of non-party pages + a forbidden-value grep. Extended here with callable-response capture
@@ -27,7 +30,7 @@
  */
 
 import { chromium } from 'playwright'
-import { writeFileSync, mkdirSync, openSync } from 'node:fs'
+import { writeFileSync, mkdirSync, openSync, readFileSync } from 'node:fs'
 import { spawn, execSync } from 'node:child_process'
 import { setTimeout as sleep } from 'node:timers/promises'
 import path from 'node:path'
@@ -406,6 +409,44 @@ async function main() {
     const forbid = nonParties([AUC_SELLER, WINNER])   // only the two sale parties may see the clearing price
     const leaks = forbid.filter((t) => hasVal(hayV(studs[t]), WIN_BID))
     assert(leaks.length === 0, `LEG 1/6 — post-settlement, clearing price ($${WIN_BID}) still reaches no non-party (checked [${forbid.join(', ')}]; leaked: [${leaks.join(', ')}])`)
+  }
+
+  // ── LEG 7 — the Slice-4 instructor surfaces: leaderboard + transaction graph ─────
+  // The transaction graph is instructor-only BY CONSTRUCTION (v3 §13.1): there is no student
+  // path to it. Assert (a) a STUDENT session is REJECTED by both new reads; (b) the INSTRUCTOR
+  // sees the cross-team leaderboard (14 teams + the efficient benchmark) and the price graph
+  // (the deal, the settled auction, the price-less swap); (c) the projector Ownership view
+  // REUSES the students' component (imported, not re-implemented).
+  {
+    const gStu = await callFn('getTransactionGraph', asStudent(pidForTeam(world, BYS1), {}))
+    const lStu = await callFn('getLeaderboard', asStudent(pidForTeam(world, BYS1), {}))
+    const rejected = (r) => !r.ok && /unauth|permission|invalid|token|instructor|argument/i.test(JSON.stringify(r.error ?? {}) + r.status)
+    assert(rejected(gStu) && rejected(lStu),
+      `LEG 7 — a STUDENT is rejected by getTransactionGraph (status ${gStu.status}) and getLeaderboard (status ${lStu.status}) — instructor only`)
+
+    const board = await callFn('getLeaderboard', asDev({}))
+    const state = await callFn('getMarketState', asDev({}))
+    const eff = state.result?.efficient_market_value
+    const okBoard = board.ok && board.result?.teams?.length === N_TEAMS &&
+      board.result.efficient_market_value === eff && eff > 0 &&
+      typeof board.result.total_initial_value === 'number' &&
+      typeof board.result.value_after_trade === 'number'
+    assert(okBoard, `LEG 7 — instructor leaderboard: ${board.result?.teams?.length} teams · Efficient Market Value $${eff} · value-after-trade $${board.result?.value_after_trade}`)
+
+    const graph = await callFn('getTransactionGraph', asDev({}))
+    const pts = graph.result?.points ?? []
+    const hasDeal = pts.some((p) => p.type === 'deal' && p.price_per_license === DEAL_PRICE)
+    const hasAuc  = pts.some((p) => p.type === 'auction' && p.price_per_license === WIN_BID)
+    const hasSwap = pts.some((p) => p.type === 'swap' && p.price_per_license == null)
+    assert(graph.ok && hasDeal && hasAuc && hasSwap && graph.result?.opened_at != null,
+      `LEG 7 — instructor graph carries cross-team prices: deal $${DEAL_PRICE}/lic, auction $${WIN_BID}/lic, swap price-less (${pts.length} points)`)
+
+    // Static guard: the projector Ownership view REUSES the student component, never a fork —
+    // its board testid lives ONLY in the shared component, so the projector must merely import it.
+    const src = readFileSync(path.join(ROOT, 'frontend/src/pages/InstructorMarket.tsx'), 'utf8')
+    const importsBoard = /import OwnershipBoard from ['"]\.\.\/market\/OwnershipBoard['"]/.test(src)
+    const noFork = !/data-testid="ownership-board"/.test(src)
+    assert(importsBoard && noFork, 'LEG 7 — the projector imports the shared OwnershipBoard (not a duplicate)')
   }
 
   banner(`RESULT — ${PASS} passed, ${FAIL} failed`)

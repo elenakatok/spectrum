@@ -2,6 +2,7 @@ import { BrowserRouter, Routes, Route } from 'react-router-dom'
 import { auth, functions } from './firebase'
 import Play from './pages/Play'
 import InstructorDashboard from './pages/InstructorDashboard'
+import InstructorMarket from './pages/InstructorMarket'
 import Configure from './pages/Configure'
 import Reports from './pages/Reports'
 import { SettingsPage } from '@mygames/game-ui'
@@ -25,6 +26,7 @@ export default function App() {
       <Routes>
         <Route path="/"          element={<Play />} />
         <Route path="/dashboard" element={<InstructorDashboard />} />
+        <Route path="/market"    element={<InstructorMarket />} />
         <Route path="/configure" element={<Configure />} />
         <Route path="/reports"   element={<Reports />} />
         <Route path="/settings"  element={
