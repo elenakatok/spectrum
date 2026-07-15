@@ -103,15 +103,19 @@ async function seedActivity(pids, teamOf, pwOf, instrToken) {
     await callProd('executeSwap', { token: tokenOfTeam(9), regionX: r9, quantityX: 1, regionY: r10, quantityY: 1, partnerTeam: 10, partnerPassword: pwOf.get(10) })
     done.push(`swap T9(${r9})↔T10(${r10})`)
   }
-  // Settled auction — team 11 sells, team 12 bids, instructor force-settles now (a △ point).
+  // Settled auction — team 11 sells with a SHORT window, team 12 bids; we wait for it to END and
+  // then settle (settleAuction refuses an auction that hasn't ended; placeBid refuses one that
+  // has — so bid now, settle later). Yields a △ graph point once settled.
   const r11 = await freeRegionOf(11)
+  let settledAuc = null
   if (r11) {
+    await inst.collection('market').doc('state').update({ auction_duration_minutes: 0.5 })
     const a = await callProd('createAuction', { token: tokenOfTeam(11), region: r11, quantity: 1, reserve: 0 })
     await callProd('placeBid', { token: tokenOfTeam(12), auction_id: a.auction_id, amount: 305 })
-    await callProd('settleAuction', { token: instrToken, auction_id: a.auction_id })
-    done.push(`auction T11→T12 ${r11} $305 settled`)
+    settledAuc = { id: a.auction_id, endsAt: a.ends_at, region: r11 }
   }
-  // Mid-flight auction — team 13, left OPEN so the ownership board shows 🔒 at capture time.
+  // Mid-flight auction — team 13 with a LONG window so it's still OPEN at capture (🔒 marker).
+  await inst.collection('market').doc('state').update({ auction_duration_minutes: 8 })
   const r13 = await freeRegionOf(13)
   if (r13) {
     await callProd('createAuction', { token: tokenOfTeam(13), region: r13, quantity: 1, reserve: 0 })
@@ -130,6 +134,16 @@ async function seedActivity(pids, teamOf, pwOf, instrToken) {
     for (const l of byRegion.get(blockRegion).slice(0, 2)) b.update(l.ref, { owner_team: 1 })
     await b.commit()
     done.push(`block T1 ${blockRegion}×2`)
+  }
+  // Now wait for the short auction to end, then settle it (tolerate the Cloud Task/backstop
+  // beating us to it — runSettlement is idempotent, so either way we get the settled △ point).
+  if (settledAuc) {
+    const waitMs = Math.max(0, settledAuc.endsAt - Date.now() + 5000)
+    log(`waiting ${Math.round(waitMs / 1000)}s for the short auction to end, then settling…`)
+    await sleep(waitMs)
+    try { await callProd('settleAuction', { token: instrToken, auction_id: settledAuc.id }) }
+    catch (e) { log(`settle note (likely already settled): ${e.message}`) }
+    done.push(`auction T11→T12 ${settledAuc.region} $305 settled`)
   }
   log('seeded: ' + done.join(' · '))
 }
@@ -253,15 +267,17 @@ async function main() {
       if (truth) pwOf.set(t, truth.password)
     }
     // ── Seed a spread of activity so the graph/ownership/leaderboard capture is POPULATED ──
-    // Give auctions an ~8-min window (long enough that the mid-flight one is still open at
-    // capture, short enough to clear the market cutoff), then seed deals/swap/auctions/block.
-    await inst.collection('market').doc('state').update({ auction_duration_minutes: 8 })
+    // (deals + swap + a settled auction + a mid-flight auction + a block; seedActivity manages
+    // the short-vs-long auction windows itself). Adds a ~35s wait for the short auction to end.
     await seedActivity(pids, teamOf, pwOf, instrToken)
 
     const mePid = pids.find((p) => teamOf.get(p) === 1)
     const meTeam = teamOf.get(mePid)
     const buyerTeam = 2
-    const myLic = (await inst.collection('licenses').where('owner_team', '==', meTeam).where('under_auction', '==', null).get()).docs.map((d) => d.data())
+    // Single-field query + JS filter (a compound owner_team==x AND under_auction==null query
+    // returns empty in prod — null-equality doesn't compose), matching seedActivity's freeRegionOf.
+    const myLic = (await inst.collection('licenses').where('owner_team', '==', meTeam).get()).docs
+      .map((d) => d.data()).filter((l) => l.under_auction == null)
     const dealRegion = myLic[0]?.region
     ok(!!mePid && !!dealRegion, `picked student ${mePid} (Team ${meTeam}); will sell 1 in Region ${dealRegion} to Team ${buyerTeam}`)
 
@@ -302,6 +318,12 @@ async function main() {
       `dashboard progress readout non-zero (${progText.replace(/\s+/g, ' ').trim()})`)
     await instr.screenshot({ path: path.join(SHOT_DIR, '_dashboard_progress.png'), fullPage: true }).catch(() => {})
 
+    // Backend truth: confirm getTransactionGraph returns the seeded points (isolates any cold-start
+    // rendering lag in the view from a genuine data problem).
+    const graphData = await callProd('getTransactionGraph', { token: instrToken })
+    const byType = (graphData.points ?? []).reduce((m, p) => { m[p.type] = (m[p.type] || 0) + 1; return m }, {})
+    ok((graphData.points?.length ?? 0) >= 5, `getTransactionGraph returns ${graphData.points?.length ?? 0} points (${JSON.stringify(byType)}, opened_at ${graphData.opened_at ? 'set' : 'null'})`)
+
     // ── Instructor live-market dashboard (Slice 4) — the SEPARATE /market route, its own
     //    session bootstrap (same instructor JWT). Capture all five projector views. ──
     console.log('\n  Capturing the five INSTRUCTOR views:')
@@ -320,9 +342,15 @@ async function main() {
       await instr.locator(`[data-testid="nav-${view}"]`).click().catch(() => {})
       await sleep(2500)
       if (view === 'graph') {
-        const deals = await instr.locator('[data-testid="graph-deal"]').count()
-        const aucs  = await instr.locator('[data-testid="graph-auction"]').count()
-        const swaps = await instr.locator('[data-testid="graph-swap"]').count()
+        // The just-deployed getTransactionGraph can cold-start > one poll — wait for it to paint.
+        let deals = 0, aucs = 0, swaps = 0
+        for (let i = 0; i < 20; i++) {
+          deals = await instr.locator('[data-testid="graph-deal"]').count()
+          aucs  = await instr.locator('[data-testid="graph-auction"]').count()
+          swaps = await instr.locator('[data-testid="graph-swap"]').count()
+          if (deals >= 1 && aucs >= 1 && swaps >= 1) break
+          await sleep(750)
+        }
         ok(deals >= 1 && aucs >= 1 && swaps >= 1, `transaction graph POPULATED (${deals} deals, ${aucs} auctions, ${swaps} swaps)`)
       }
       if (view === 'ownership') {
