@@ -12,9 +12,13 @@
  *   LEG 4  the auction reserve appears to NOBODY (not bidders, not counterparties, not seller)
  *   LEG 5  the Teams roster is unreachable from an UNAUTHENTICATED session
  *   LEG 6  a losing bidder learns they lost but NOT the clearing price, and not the other bids
- *   LEG 7  the Slice-4 instructor surfaces (transaction graph + leaderboard) are INSTRUCTOR
- *          ONLY BY CONSTRUCTION (v3 §13.1) — a student session is rejected by both reads;
- *          the projector Ownership view reuses the students' component, never a fork
+ *   LEG 7  the Slice-4 instructor surfaces (transaction graph + leaderboard) AND the Slice-6
+ *          debrief join (getMarketReport, behind Reports 3 & 4) are INSTRUCTOR ONLY BY
+ *          CONSTRUCTION (v3 §13.1) — a student session is rejected by all three reads, and the
+ *          rejected getMarketReport path carries no synergy; Report 3's per-region realized value
+ *          equals Σ holders' own value(k) recomputed from the licenses truth (split + consolidated),
+ *          and Report 4's ledger attributes teams+actor; the projector Ownership view reuses the
+ *          students' component, never a fork
  *
  * Modelled on eBay's "2650" leak-check (games/ebay/ebay-playthrough.mjs): DOM innerText walk
  * of non-party pages + a forbidden-value grep. Extended here with callable-response capture
@@ -490,6 +494,44 @@ async function main() {
     const importsBoard = /import OwnershipBoard from ['"]\.\.\/market\/OwnershipBoard['"]/.test(src)
     const noFork = !/data-testid="ownership-board"/.test(src)
     assert(importsBoard && noFork, 'LEG 7 — the projector imports the shared OwnershipBoard (not a duplicate)')
+
+    // ── LEG 7b (Slice 6) — getMarketReport: the ONE new debrief callable behind Reports 3 & 4. ──
+    // Same privacy boundary as getTransactionGraph: instructor-only BY CONSTRUCTION. Assert
+    // (a) a STUDENT is REJECTED and the rejected path carries NO synergy/valuation; (b) Report 3's
+    // per-region realized value equals Σ holders' OWN value(count) recomputed independently from
+    // the licenses truth, with efficient=1550 argmax and gap=efficient−realized, across a SPLIT and
+    // a consolidated region; (c) Report 4's ledger attributes the deal (team identity + actor name)
+    // that getTransactionGraph deliberately strips.
+    const mStu = await callFn('getMarketReport', asStudent(pidForTeam(world, BYS1), {}))
+    assert(rejected(mStu), `LEG 7 — a STUDENT is rejected by getMarketReport (status ${mStu.status}) — instructor only`)
+    assert(!/efficient_value|realized_value|synergy/i.test(JSON.stringify(mStu.result ?? {})),
+      'LEG 7 — the rejected student getMarketReport carries no region/synergy valuations (no leak)')
+
+    const rep = await callFn('getMarketReport', asDev({}))
+    const regs = rep.result?.regions ?? []
+    const { valueOfHolding, assignedSchedule } = await import(path.join(ROOT, 'functions/lib/synergy.js'))
+    const M = N_TEAMS / 2
+    const licenses = (await fsGetDocs('licenses')).map((d) => ({ region: strVal(d.fields?.region), owner: numVal(d.fields?.owner_team) }))
+    const tally = new Map() // team -> (regionIndex -> count)
+    for (const l of licenses) {
+      const ri = l.region.charCodeAt(0) - 64
+      const m = tally.get(l.owner) ?? new Map(); m.set(ri, (m.get(ri) ?? 0) + 1); tally.set(l.owner, m)
+    }
+    let realizedOk = regs.length === M
+    for (const r of regs) {
+      let realized = 0
+      for (let g = 1; g <= N_TEAMS; g++) { const c = tally.get(g)?.get(r.region_index) ?? 0; if (c > 0) realized += valueOfHolding(assignedSchedule(g, r.region_index, M), c) }
+      if (realized !== r.realized_value || r.efficient_value !== 1550 || r.gap !== r.efficient_value - r.realized_value) realizedOk = false
+    }
+    const hasSplit = regs.some((r) => r.realized_value < r.efficient_value)      // gains left on the table
+    const hasConsolidated = regs.some((r) => r.realized_value === r.efficient_value) // a region reached efficiency
+    assert(rep.ok && realizedOk && hasSplit,
+      `LEG 7 — getMarketReport Report 3: efficient=$1550 argmax, realized==Σ holders' own value(k), gap correct across ${regs.length} regions (split present: ${hasSplit}, consolidated present: ${hasConsolidated})`)
+
+    const txs = rep.result?.transactions ?? []
+    const dealTx = txs.find((t) => t.type === 'deal' && t.price === DEAL_PRICE)
+    const attributed = !!dealTx && dealTx.from_team === DEAL_SELLER && dealTx.to_team === DEAL_BUYER && typeof dealTx.acted_by_name === 'string' && dealTx.acted_by_name.length > 0
+    assert(attributed, `LEG 7 — getMarketReport attributes the deal (Team ${DEAL_SELLER}→${DEAL_BUYER}, by "${dealTx?.acted_by_name}") — the Report 4 team identity getTransactionGraph omits`)
   }
 
   banner(`RESULT — ${PASS} passed, ${FAIL} failed`)

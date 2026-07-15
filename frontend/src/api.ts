@@ -166,6 +166,63 @@ export type TransactionGraph = {
 }
 export const getTransactionGraph = () => callFn<TransactionGraph>('getTransactionGraph', {})
 
+// ── Debrief join (Slice 6) — ONE instructor-only callable behind Reports 3 & 4 ───────
+// Returns synergy-derived valuations, attributed transactions, and actor names across ALL
+// teams — INSTRUCTOR ONLY, by construction (no student path; a student caller is rejected).
+
+export type RegionGains = {
+  region: string
+  region_index: number
+  efficient_value: number          // value(8) argmax for the region (=1550, the schedule-4 team)
+  realized_value: number           // Σ over current holders of that holder's OWN value(count)
+  gap: number                      // efficient − realized
+  top_synergy_teams: number[]      // the two strongest-synergy teams here (NOT "winners")
+}
+export type ReportTeamHolding = {
+  region: string
+  region_index: number
+  count: number
+  schedule: number
+  value: number                    // valueOfHolding(schedule, count) — this team's own realized value
+}
+export type ReportTeamMember = {
+  participant_id: string
+  display_name: string
+  action_count: number             // # deals/swaps this member initiated (acted_by)
+}
+export type ReportTeam = {
+  team_number: number
+  holdings: ReportTeamHolding[]     // regions this team currently holds (count > 0)
+  members: ReportTeamMember[]
+}
+export type ReportTransaction = {
+  transaction_id: string
+  type: 'deal' | 'swap' | 'auction' | string
+  from_team: number | null
+  to_team: number | null
+  region: string | null
+  quantity: number | null
+  price: number | null
+  price_per_license: number | null
+  region_x: string | null
+  quantity_x: number | null
+  region_y: string | null
+  quantity_y: number | null
+  acted_by: string | null
+  acted_by_name: string | null      // null for auctions (settled by the system, no actor)
+  at_ms: number | null
+}
+export type MarketReport = {
+  ok: boolean
+  num_teams: number
+  num_regions: number
+  opened_at: number | null
+  regions: RegionGains[]            // Report 3
+  teams: ReportTeam[]               // Report 4
+  transactions: ReportTransaction[] // Report 4 (attributed ledger — filter by from/to_team)
+}
+export const getMarketReport = () => callFn<MarketReport>('getMarketReport', {})
+
 // ── Instructor API ────────────────────────────────────────────────────────────
 
 export type InstructorSessionArgs =

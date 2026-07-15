@@ -24,6 +24,7 @@ import { Timestamp } from 'firebase-admin/firestore'
 import { extractInstructorGameId } from '@mygames/game-server'
 import type { GameDefinition } from '@mygames/game-server'
 import { truthRef, isEmu, authHeaderOf, type Ref } from './ledger'
+import { computeRegionGains, teamHoldingRows, type HoldingsMap } from './marketReportCore'
 
 const toMillis = (v: unknown): number | null =>
   v instanceof Timestamp ? v.toMillis() : typeof v === 'number' ? v : null
@@ -116,6 +117,136 @@ export function makeGetTransactionGraph(def: GameDefinition) {
       ok: true as const,
       opened_at: toMillis(stateSnap.data()?.['opened_at']),
       points,
+    }
+  })
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// 3. getMarketReport (Slice 6) — the debrief join. ONE instructor-only callable that
+//    serves BOTH Report 3 (per-region gains-from-trade) AND Report 4 (per-team detail),
+//    keeping the synergy + ownership + ledger join in a single instructor-authed place.
+//
+//    INSTRUCTOR ONLY, BY CONSTRUCTION — like getTransactionGraph, this returns synergy-
+//    derived valuations and price/actor data across ALL teams. There is NO student path to
+//    it (DOM/API/RTDB); a student caller is rejected outright by extractInstructorGameId.
+//    Synergy is NEVER returned to any student path — the privacy walk asserts this leg.
+//
+//    Synergy is computed PURELY from (team, region, M) via the exact functions
+//    (assignedSchedule/valueOfHolding) that GENERATED each team's stored truth.synergy, so
+//    realized/efficient here are identical to the truth docs by construction — no denied
+//    reads needed. Ownership is read from the `licenses` collection (owner_team is the ONE
+//    ownership truth, invariant 1). The efficient value per region is the value(8) argmax
+//    (=1550, the schedule-4 team) — the SAME benchmark getLeaderboard's aggregate uses.
+// ─────────────────────────────────────────────────────────────────────────────
+export function makeGetMarketReport(def: GameDefinition) {
+  return onCall({ cors: def.corsOrigins }, async (request) => {
+    const data = request.data as Record<string, unknown>
+    const gameInstanceId = await extractInstructorGameId(data, isEmu(), authHeaderOf(request))
+    const instanceRef: Ref = admin.firestore().collection('game_instances').doc(gameInstanceId)
+    const rtdb = admin.database()
+
+    const [stateSnap, groupsSnap, licensesSnap, txSnap, participantsSnap, attendingSnap] = await Promise.all([
+      instanceRef.collection('market').doc('state').get(),
+      instanceRef.collection('groups').get(),
+      instanceRef.collection('licenses').get(),
+      instanceRef.collection('transactions').get(),
+      instanceRef.collection('participants').get(),
+      rtdb.ref(`game_instances/${gameInstanceId}/attendance`).get(),
+    ])
+    if (!stateSnap.exists) throw new HttpsError('failed-precondition', 'The market has not been grouped yet.')
+    const state = stateSnap.data() ?? {}
+    const N = Number(state['num_teams'] ?? 0)
+    const M = Number(state['num_regions'] ?? (N > 0 ? N / 2 : 0))
+    if (N < 1 || M < 1) throw new HttpsError('failed-precondition', 'The market has not been grouped yet.')
+
+    // ── Names: RTDB attendance display_name wins, then participants doc, then a short id. ──
+    const attending = (attendingSnap.val() ?? {}) as Record<string, { display_name?: string } | null>
+    const pById = new Map<string, Record<string, unknown>>()
+    for (const p of participantsSnap.docs) pById.set(p.id, p.data() as Record<string, unknown>)
+    const nameOf = (pid: string): string => {
+      const d = pById.get(pid) ?? {}
+      const rtdbName = attending[pid]?.display_name?.trim()
+      const fsName = ((d['display_name'] ?? d['name'] ?? '') as string).trim()
+      return rtdbName || fsName || `${pid.slice(0, 8)}…`
+    }
+
+    // ── Ownership tally: current holdings[team][regionIndex] = count, from the licenses truth. ──
+    const regionIndexOf = (letter: string): number => letter.charCodeAt(0) - 'A'.charCodeAt(0) + 1
+    const holdings: HoldingsMap = new Map<number, Map<number, number>>() // team -> (regionIndex -> count)
+    for (const d of licensesSnap.docs) {
+      const owner = Number(d.data()['owner_team'] ?? 0)
+      const ri = regionIndexOf(String(d.data()['region'] ?? ''))
+      if (owner < 1 || ri < 1) continue
+      const byRegion = holdings.get(owner) ?? new Map<number, number>()
+      byRegion.set(ri, (byRegion.get(ri) ?? 0) + 1)
+      holdings.set(owner, byRegion)
+    }
+
+    // ── Report 3: per-region gains-from-trade (PURE core — see marketReportCore.ts). Efficient =
+    //    value(8) argmax; realized = Σ current holders' OWN value(count); gap = efficient − realized. ──
+    const regions = computeRegionGains(holdings, N, M)
+
+    // ── Attributed transaction ledger (Report 4). Full team identity + actor names — the data
+    //    getTransactionGraph deliberately strips. Instructor-only, like the rest of this call. ──
+    const actionCount = new Map<string, number>() // participant_id -> # deals/swaps they initiated
+    const transactions = txSnap.docs
+      .map((d) => {
+        const x = d.data()
+        const type = x['type'] as string
+        const actedBy = (x['acted_by'] as string | null) ?? null
+        if (actedBy) actionCount.set(actedBy, (actionCount.get(actedBy) ?? 0) + 1)
+        const isSwap = type === 'swap'
+        const price = isSwap ? null : ((x['price'] as number | null | undefined) ?? null)
+        const quantity = isSwap ? null : (x['quantity'] != null ? Number(x['quantity']) : null)
+        return {
+          transaction_id: (x['transaction_id'] as string) ?? d.id,
+          type,
+          from_team: (x['from_team'] as number | null) ?? null,
+          to_team: (x['to_team'] as number | null) ?? null,
+          region: isSwap ? null : ((x['region'] as string | undefined) ?? null),
+          quantity,
+          price,
+          price_per_license: price != null && quantity ? price / quantity : null,
+          region_x: isSwap ? ((x['region_x'] as string | undefined) ?? null) : null,
+          quantity_x: isSwap ? ((x['quantity_x'] as number | undefined) ?? null) : null,
+          region_y: isSwap ? ((x['region_y'] as string | undefined) ?? null) : null,
+          quantity_y: isSwap ? ((x['quantity_y'] as number | undefined) ?? null) : null,
+          acted_by: actedBy,
+          acted_by_name: actedBy ? nameOf(actedBy) : null,
+          at_ms: toMillis(x['at']),
+        }
+      })
+      .sort((a, b) => (a.at_ms ?? 0) - (b.at_ms ?? 0))
+
+    // ── Per-team detail (Report 4): current holdings-with-value + members + their activity. ──
+    const membersByTeam = new Map<number, string[]>() // team_number -> participant_ids
+    for (const p of participantsSnap.docs) {
+      const t = Number((p.data() as Record<string, unknown>)['team_number'] ?? 0)
+      if (t < 1) continue
+      const arr = membersByTeam.get(t) ?? []
+      arr.push(p.id)
+      membersByTeam.set(t, arr)
+    }
+    const teams = groupsSnap.docs
+      .filter((g) => g.data()['team_number'] != null)
+      .map((g) => {
+        const team_number = g.data()['team_number'] as number
+        const teamHoldings = teamHoldingRows(holdings, team_number, M)
+        const members = (membersByTeam.get(team_number) ?? [])
+          .map((pid) => ({ participant_id: pid, display_name: nameOf(pid), action_count: actionCount.get(pid) ?? 0 }))
+          .sort((a, b) => a.display_name.localeCompare(b.display_name))
+        return { team_number, holdings: teamHoldings, members }
+      })
+      .sort((a, b) => a.team_number - b.team_number)
+
+    return {
+      ok: true as const,
+      num_teams: N,
+      num_regions: M,
+      opened_at: toMillis(state['opened_at']),
+      regions,
+      teams,
+      transactions,
     }
   })
 }

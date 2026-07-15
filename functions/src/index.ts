@@ -28,7 +28,7 @@ import { makeGroupParticipants, makeStartMarket, makeGetMarketState } from './gr
 import { makeExecuteDeal, makeExecuteSwap, makeSettleAuction } from './ledger'
 import { makeCreateAuction, makePlaceBid, makeGetAuctionState, settleAuctionTask } from './auctionLifecycle'
 import { makeGetTeamState, makeGetTeamHistory, makeGetTeamsDirectory } from './studentReads'
-import { makeGetLeaderboard, makeGetTransactionGraph } from './instructorReads'
+import { makeGetLeaderboard, makeGetTransactionGraph, makeGetMarketReport } from './instructorReads'
 
 admin.initializeApp()
 
@@ -80,6 +80,11 @@ export const getTeamsDirectory          = makeGetTeamsDirectory(spectrumGameDef)
 //   getTransactionGraph   → View 3 Transaction Graph (all prices — INSTRUCTOR ONLY)
 export const getLeaderboard             = makeGetLeaderboard(spectrumGameDef)
 export const getTransactionGraph        = makeGetTransactionGraph(spectrumGameDef)
+
+// ── Debrief join (Slice 6) — ONE instructor-only callable behind Reports 3 & 4 ────
+//   getMarketReport → per-region gains-from-trade (synergy×ownership) + per-team detail
+//                     (attributed ledger + members). INSTRUCTOR ONLY, like getTransactionGraph.
+export const getMarketReport            = makeGetMarketReport(spectrumGameDef)
 
 // Guard: the shared dashboard's "Match Now" button is hidden by the Spectrum grouping
 // panel, but if it is ever reached it must NOT run the rolling matcher (which would tile
