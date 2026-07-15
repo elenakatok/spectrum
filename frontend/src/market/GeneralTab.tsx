@@ -11,13 +11,12 @@ import { money, regionValue, clock, type RegionSchedule } from './shared'
 type Holding = { region: string; count: number }
 
 export default function GeneralTab({
-  teamNumber, teamPassword, synergy, endowmentRegions,
+  teamNumber, teamPassword, synergy,
   teamState, holdings, openAuctions, myTeam, onActed,
 }: {
   teamNumber: number
   teamPassword: string
   synergy: RegionSchedule[]
-  endowmentRegions: string[]
   teamState: TeamState | null
   holdings: Holding[]
   openAuctions: AuctionState[]
@@ -74,15 +73,14 @@ export default function GeneralTab({
             <tr><th style={th}>Region</th>{Array.from({ length: 8 }, (_, i) => <th key={i} style={th}>{i + 1}</th>)}</tr>
           </thead>
           <tbody>
-            {synergy.map((row) => {
-              const owned = endowmentRegions.includes(row.region)
-              return (
-                <tr key={row.region} style={owned ? { background: '#fff6e9' } : undefined}>
-                  <td style={{ ...td, fontWeight: 700, textAlign: 'left' }}>{row.region}{owned ? ' ●' : ''}</td>
-                  {row.values.map((v, i) => <td key={i} style={td}>{v}</td>)}
-                </tr>
-              )
-            })}
+            {/* All regions × 1–8, no holding/endowment markers — the portfolio table above is
+                the single source of what you currently hold (a synergy dot went stale on sale). */}
+            {synergy.map((row) => (
+              <tr key={row.region}>
+                <td style={{ ...td, fontWeight: 700, textAlign: 'left' }}>{row.region}</td>
+                {row.values.map((v, i) => <td key={i} style={td}>{v}</td>)}
+              </tr>
+            ))}
           </tbody>
         </table>
       </div>

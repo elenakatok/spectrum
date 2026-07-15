@@ -67,19 +67,21 @@ export default function OwnershipBoard({ licenses, myTeam = null, headerRight, t
                 {cells.map((c) => {
                   const block = (counts.get(c.owner_team) ?? 0) >= 2
                   const mine = myTeam != null && c.owner_team === myTeam
+                  const auctioned = !!c.under_auction
                   return (
                     <td
                       key={c.license_id}
                       data-testid={`own-${c.license_id}`}
-                      title={c.under_auction ? 'Under auction' : undefined}
+                      title={auctioned ? 'Under auction' : undefined}
                       style={{
+                        // Under-auction is a distinct lock STATE — its tint wins over mine/block
+                        // so it reads clearly on the projector (was a near-invisible faint dot).
                         ...cell,
-                        background: mine ? '#fff2dd' : block ? '#eef4ff' : undefined,
+                        background: auctioned ? '#fde2dd' : mine ? '#fff2dd' : block ? '#eef4ff' : undefined,
                         fontWeight: block ? 700 : 400,
-                        opacity: c.under_auction ? 0.55 : 1,
                       }}
                     >
-                      {c.owner_team}{c.under_auction ? '·' : ''}
+                      {c.owner_team}{auctioned ? ' 🔒' : ''}
                     </td>
                   )
                 })}
@@ -92,7 +94,7 @@ export default function OwnershipBoard({ licenses, myTeam = null, headerRight, t
         </table>
       </div>
       <p style={{ color: colors.textSecondary, fontSize: '0.78rem', marginTop: spacing.gapSm }}>
-        Blue = one team holds two or more here. · = under auction.{myTeam != null ? ' Amber = your team.' : ''}
+        Blue = one team holds two or more here. 🔒 (red) = under auction.{myTeam != null ? ' Amber = your team.' : ''}
       </p>
     </section>
   )

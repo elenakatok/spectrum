@@ -3,7 +3,7 @@ import { createPortal } from 'react-dom'
 import { InstructorDashboard as SharedDashboard } from '@mygames/game-ui'
 import { auth, functions, rtdb } from '../firebase'
 import { spectrumConfig } from '../gameConfig'
-import { groupParticipants, startMarket, getMarketState, type MarketState } from '../api'
+import { groupParticipants, startMarket, getMarketState, getLeaderboard, type MarketState } from '../api'
 
 const roleLabels = Object.fromEntries(
   spectrumConfig.roles.map(r => [r.key, r.label])
@@ -53,9 +53,16 @@ function tidySharedDashboard() {
   }
 }
 
+// Live market progress (invariant 5): current value = Σ team portfolios; efficiency captured =
+// how far the market has closed the gap from the initial allocation toward the efficient ceiling.
+type Progress = { current: number; initial: number; efficient: number }
+const efficiencyPct = (p: Progress) =>
+  p.efficient > p.initial ? Math.round(((p.current - p.initial) / (p.efficient - p.initial)) * 100) : 0
+
 function GroupingPanel() {
   const [host, setHost] = useState<HTMLElement | null>(null)
   const [state, setState] = useState<MarketState | null>(null)
+  const [progress, setProgress] = useState<Progress | null>(null)
   const [nInput, setNInput] = useState('20')
   const [nSet, setNSet] = useState<number | null>(null)
   const [busy, setBusy] = useState(false)
@@ -78,7 +85,17 @@ function GroupingPanel() {
     const tick = () => {
       tidySharedDashboard()
       getMarketState()
-        .then(s => { if (alive) setState(s) })
+        .then(s => {
+          if (!alive) return
+          setState(s)
+          // Once open, poll the live leaderboard for the current-value + efficiency readout
+          // (same refresh cadence as the leaderboard view — invariant 5).
+          if (s.status === 'open' || s.status === 'closed') {
+            getLeaderboard()
+              .then(b => { if (alive) setProgress({ current: b.value_after_trade, initial: b.total_initial_value, efficient: b.efficient_market_value }) })
+              .catch(() => { /* transient — retried next tick */ })
+          }
+        })
         .catch(() => { /* session not ready yet — retry on the interval */ })
     }
     tick()
@@ -104,10 +121,11 @@ function GroupingPanel() {
     if (nSet == null) return
     setBusy(true); setMsg('Grouping…')
     groupParticipants(nSet)
+      // NOTE: the efficient-market value is shown in the bold summary below — don't restate it here.
       .then(r => setMsg(
         r.alreadyGrouped
           ? `Already grouped: ${r.teams_created} teams.`
-          : `Grouped ${r.teams_created} teams into ${r.num_regions} regions. Efficient Market Value ${money(r.efficient_market_value)}.`,
+          : `Grouped ${r.teams_created} teams into ${r.num_regions} regions.`,
       ))
       .catch((e: unknown) => setMsg(e instanceof Error ? e.message : 'Grouping failed.'))
       .finally(() => setBusy(false))
@@ -168,17 +186,25 @@ function GroupingPanel() {
       )}
 
       {open && (
-        <div style={{ display: 'flex', alignItems: 'center', gap: '0.9rem', flexWrap: 'wrap' }}>
-          <span style={{ fontSize: '0.9rem', color: '#137333', fontWeight: 600 }}>
-            ● Market open — {state?.num_teams} teams · {state?.num_regions} regions
-            {state?.closes_at ? ` · closes at ${new Date(state.closes_at).toLocaleTimeString()}` : ''}
+        <div style={{ display: 'flex', flexDirection: 'column', gap: '0.35rem' }}>
+          <div style={{ display: 'flex', alignItems: 'center', gap: '0.9rem', flexWrap: 'wrap' }}>
+            <span style={{ fontSize: '0.9rem', color: '#137333', fontWeight: 600 }}>
+              ● Market open — {state?.num_teams} teams · {state?.num_regions} regions
+              {state?.closes_at ? ` · closes at ${new Date(state.closes_at).toLocaleTimeString()}` : ''}
+            </span>
+            {/* The live projector dashboard is a separate route; carry the same launch token
+                (?token=&game_instance_id= or the DEV bypass) straight through its query string. */}
+            <a data-testid="open-live-market" href={`/market${window.location.search}`}
+              style={{ fontSize: '0.9rem', fontWeight: 600, color: '#D38626' }}>
+              Open live market dashboard →
+            </a>
+          </div>
+          {/* Live progress — current market value (Σ portfolios) + efficiency captured. 0% at open. */}
+          <span data-testid="market-progress" style={{ fontSize: '0.9rem', color: '#555' }}>
+            Current Market Value <strong>{money(progress?.current)}</strong>
+            {' · '}Efficiency captured <strong>{progress ? efficiencyPct(progress) : 0}%</strong>
+            {' '}<span style={{ color: '#888' }}>of Efficient Market Value {money(state?.efficient_market_value)}</span>
           </span>
-          {/* The live projector dashboard is a separate route; carry the same launch token
-              (?token=&game_instance_id= or the DEV bypass) straight through its query string. */}
-          <a data-testid="open-live-market" href={`/market${window.location.search}`}
-            style={{ fontSize: '0.9rem', fontWeight: 600, color: '#D38626' }}>
-            Open live market dashboard →
-          </a>
         </div>
       )}
 

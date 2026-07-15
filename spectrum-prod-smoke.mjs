@@ -10,6 +10,14 @@
  * instructor /market route (→ real getLeaderboard/getTransactionGraph/getRoster) and screenshot all
  * five projector views, then RESTORE the instance to bare.
  *
+ * Part 2 (populated graph): before capture, seedActivity() drives a realistic spread via the REAL
+ * deployed callables — several deals (distinct regions/prices), a settled auction, a swap, a
+ * 2-license block, and one auction left OPEN mid-flight — so the graph (○ deals / △ auction / ◇ swap),
+ * the blue ownership block, the 🔒 under-auction marker and the non-zero dashboard progress readout
+ * are all exercised. spreadTimeline() then spreads the (real) transactions' timestamps across the
+ * elapsed window and backdates opened_at so the X = elapsed-minutes axis reads clearly (we can't wait
+ * 40 real minutes; prices/regions/types stay real — only `at` is adjusted for the screenshot).
+ *
  * Reads/writes ONLY a course-ABC test instance; signs tokens with the classroom key (same as the
  * launcher). Requires ADC (gcloud application-default) + classroom/scripts/game-jwt-private.pem.
  *
@@ -53,6 +61,95 @@ function signToken(role, participantId, name) {
     classroom_callback_url: 'https://classroom.mygames.live/api/game-results',
     callback_secret_id: 'spectrum_v1',
   }, KEY, { algorithm: 'RS256', keyid: 'classroom-v1' })
+}
+
+// Call a DEPLOYED callable directly (onCall v2 over HTTP, same alias the browser SDK uses).
+// Student/instructor auth travels as a classroom JWT in data.token — the callables accept it
+// (the path assignRole bootstraps on); allUsers invoker means no IAM, and a node fetch is not
+// subject to browser CORS. Lets us seed a realistic spread of activity fast, no admin ledger writes.
+async function callProd(name, data) {
+  const res = await fetch(`https://us-central1-${PROJECT}.cloudfunctions.net/${name}`, {
+    method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ data }),
+  })
+  const j = await res.json().catch(() => ({}))
+  if (!res.ok || j.error) throw new Error(`${name} (${res.status}): ${JSON.stringify(j.error ?? j)}`)
+  return j.result
+}
+
+// Seed a realistic spread so the instructor Transaction Graph is captured POPULATED: several deals
+// (distinct regions/prices), a settled auction (a △ point), a swap (the price-less strip), a
+// 2-license block (a blue ownership cell) and an auction left OPEN mid-flight (the 🔒 marker).
+// Every trade is a REAL deployed callable; only the block + the timestamp spread are visual seeds.
+async function seedActivity(pids, teamOf, pwOf, instrToken) {
+  const pidOfTeam   = (t) => pids.find((p) => teamOf.get(p) === t)
+  const tokenOfTeam = (t) => signToken('student', pidOfTeam(t), `Trader T${t}`)
+  const freeRegionOf = async (t) => {
+    const ls = (await inst.collection('licenses').where('owner_team', '==', t).get()).docs
+      .map((d) => d.data()).filter((l) => l.under_auction == null)
+    return ls[0]?.region ?? null
+  }
+  const done = []
+
+  // Deals — distinct (seller, buyer, region, price). Team 1's deal is the browser-UI one.
+  for (const [s, b, price] of [[3, 4, 340], [5, 6, 175], [7, 8, 415]]) {
+    const region = await freeRegionOf(s)
+    if (!region) continue
+    await callProd('executeDeal', { token: tokenOfTeam(s), region, quantity: 1, price, buyerTeam: b, buyerPassword: pwOf.get(b) })
+    done.push(`deal T${s}→T${b} ${region} $${price}`)
+  }
+  // Swap — team 9 ↔ team 10 (price-less strip).
+  const r9 = await freeRegionOf(9), r10 = await freeRegionOf(10)
+  if (r9 && r10 && r9 !== r10) {
+    await callProd('executeSwap', { token: tokenOfTeam(9), regionX: r9, quantityX: 1, regionY: r10, quantityY: 1, partnerTeam: 10, partnerPassword: pwOf.get(10) })
+    done.push(`swap T9(${r9})↔T10(${r10})`)
+  }
+  // Settled auction — team 11 sells, team 12 bids, instructor force-settles now (a △ point).
+  const r11 = await freeRegionOf(11)
+  if (r11) {
+    const a = await callProd('createAuction', { token: tokenOfTeam(11), region: r11, quantity: 1, reserve: 0 })
+    await callProd('placeBid', { token: tokenOfTeam(12), auction_id: a.auction_id, amount: 305 })
+    await callProd('settleAuction', { token: instrToken, auction_id: a.auction_id })
+    done.push(`auction T11→T12 ${r11} $305 settled`)
+  }
+  // Mid-flight auction — team 13, left OPEN so the ownership board shows 🔒 at capture time.
+  const r13 = await freeRegionOf(13)
+  if (r13) {
+    await callProd('createAuction', { token: tokenOfTeam(13), region: r13, quantity: 1, reserve: 0 })
+    done.push(`auction T13 ${r13} OPEN`)
+  }
+  // Block — give team 1 a 2nd license in one region (a blue ownership cell). Visual seed via
+  // admin (like the participant seed); wiped by restore. Deals ran first, so nothing in-flight moves.
+  const pool = (await inst.collection('licenses').get()).docs
+    .map((d) => ({ ref: d.ref, region: d.data().region, auc: d.data().under_auction }))
+    .filter((l) => l.auc == null)
+  const byRegion = new Map()
+  for (const l of pool) { const a = byRegion.get(l.region) ?? []; a.push(l); byRegion.set(l.region, a) }
+  const blockRegion = [...byRegion.entries()].find(([, a]) => a.length >= 2)?.[0]
+  if (blockRegion) {
+    const b = db.batch()
+    for (const l of byRegion.get(blockRegion).slice(0, 2)) b.update(l.ref, { owner_team: 1 })
+    await b.commit()
+    done.push(`block T1 ${blockRegion}×2`)
+  }
+  log('seeded: ' + done.join(' · '))
+}
+
+// Spread transaction timestamps across a ~38-min elapsed window and backdate opened_at, so the
+// graph's X = elapsed-minutes axis is visibly exercised (we can't wait 38 real minutes). Prices,
+// regions and types are all REAL — only `at` is adjusted, purely for the screenshot.
+async function spreadTimeline() {
+  const openedAt = admin.firestore.Timestamp.fromMillis(Date.now() - 42 * 60000)
+  await inst.collection('market').doc('state').update({ opened_at: openedAt })
+  const txs = (await inst.collection('transactions').get()).docs
+    .sort((a, b) => (a.data().at?.toMillis?.() ?? 0) - (b.data().at?.toMillis?.() ?? 0))
+  if (txs.length === 0) return
+  const startMs = openedAt.toMillis() + 4 * 60000, endMs = Date.now() - 3 * 60000
+  const batch = db.batch()
+  txs.forEach((d, i) => {
+    const t = txs.length === 1 ? (startMs + endMs) / 2 : startMs + ((endMs - startMs) * i) / (txs.length - 1)
+    batch.update(d.ref, { at: admin.firestore.Timestamp.fromMillis(Math.round(t)) })
+  })
+  await batch.commit()
 }
 
 // Fields WE add to a participant (seed + grouping) — deleted on restore to leave the instance bare.
@@ -155,10 +252,16 @@ async function main() {
       const truth = (await g.ref.collection('truth').doc('team').get()).data()
       if (truth) pwOf.set(t, truth.password)
     }
+    // ── Seed a spread of activity so the graph/ownership/leaderboard capture is POPULATED ──
+    // Give auctions an ~8-min window (long enough that the mid-flight one is still open at
+    // capture, short enough to clear the market cutoff), then seed deals/swap/auctions/block.
+    await inst.collection('market').doc('state').update({ auction_duration_minutes: 8 })
+    await seedActivity(pids, teamOf, pwOf, instrToken)
+
     const mePid = pids.find((p) => teamOf.get(p) === 1)
     const meTeam = teamOf.get(mePid)
     const buyerTeam = 2
-    const myLic = (await inst.collection('licenses').where('owner_team', '==', meTeam).get()).docs.map((d) => d.data())
+    const myLic = (await inst.collection('licenses').where('owner_team', '==', meTeam).where('under_auction', '==', null).get()).docs.map((d) => d.data())
     const dealRegion = myLic[0]?.region
     ok(!!mePid && !!dealRegion, `picked student ${mePid} (Team ${meTeam}); will sell 1 in Region ${dealRegion} to Team ${buyerTeam}`)
 
@@ -177,10 +280,27 @@ async function main() {
     await stu.locator(`[data-testid="deal-submit-${dealRegion}"]`).click()
     await sleep(4000) // onActed refresh (getTeamState/History) after the deal
 
+    // Now that every transaction exists (seeded + this browser deal), spread their timestamps
+    // across the elapsed window so the graph's X axis is visibly exercised at capture time.
+    await spreadTimeline()
+
     // ── Capture the five student tabs ──
     console.log('\n  Capturing the five student tabs:')
     for (const tab of ['general', 'ownership', 'teams', 'transactions', 'history']) await shoot(stu, tab, `team${meTeam}-${tab}`)
     ok(true, 'five prod student tab screenshots captured')
+
+    // ── Dashboard live progress readout (item 1) — non-zero after the seeded trades ──
+    await instr.reload()
+    await instr.locator('[data-testid="market-progress"]').waitFor({ timeout: 30_000 }).catch(() => {})
+    let progText = ''
+    for (let i = 0; i < 20; i++) {
+      progText = await instr.locator('[data-testid="market-progress"]').innerText().catch(() => '')
+      if (/Current Market Value\s*\$[1-9]/.test(progText)) break
+      await sleep(750)
+    }
+    ok(/Current Market Value\s*\$[1-9]/.test(progText) && /Efficiency captured/.test(progText),
+      `dashboard progress readout non-zero (${progText.replace(/\s+/g, ' ').trim()})`)
+    await instr.screenshot({ path: path.join(SHOT_DIR, '_dashboard_progress.png'), fullPage: true }).catch(() => {})
 
     // ── Instructor live-market dashboard (Slice 4) — the SEPARATE /market route, its own
     //    session bootstrap (same instructor JWT). Capture all five projector views. ──
@@ -199,6 +319,16 @@ async function main() {
     for (const view of ['performance', 'ownership', 'graph', 'teams', 'quiz']) {
       await instr.locator(`[data-testid="nav-${view}"]`).click().catch(() => {})
       await sleep(2500)
+      if (view === 'graph') {
+        const deals = await instr.locator('[data-testid="graph-deal"]').count()
+        const aucs  = await instr.locator('[data-testid="graph-auction"]').count()
+        const swaps = await instr.locator('[data-testid="graph-swap"]').count()
+        ok(deals >= 1 && aucs >= 1 && swaps >= 1, `transaction graph POPULATED (${deals} deals, ${aucs} auctions, ${swaps} swaps)`)
+      }
+      if (view === 'ownership') {
+        const board = await instr.locator('[data-testid="ownership-board"]').innerText().catch(() => '')
+        ok(board.includes('🔒'), 'ownership board shows the under-auction 🔒 marker (mid-flight auction)')
+      }
       const file = path.join(SHOT_DIR, `instructor-${view}.png`)
       await instr.screenshot({ path: file, fullPage: true })
       log(`  📸 ${view} → ${file}`)

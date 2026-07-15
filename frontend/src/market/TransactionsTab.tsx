@@ -88,7 +88,7 @@ function DealRow({ h, available, onActed }: { h: Holding; available: number; onA
     <Row>
       <RegionTag region={h.region} count={h.count} />
       <NumIn label="Qty" value={qty} onChange={setQty} min={1} max={h.count} testid={`deal-qty-${h.region}`} />
-      <NumIn label="Price" value={price} onChange={setPrice} min={0} placeholder="whole lot" testid={`deal-price-${h.region}`} />
+      <NumIn label="Price" value={price} onChange={setPrice} min={0} testid={`deal-price-${h.region}`} />
       <NumIn label="Buyer team" value={buyer} onChange={setBuyer} min={1} testid={`deal-buyer-${h.region}`} />
       <PwIn label="Buyer's password" value={pw} onChange={setPw} testid={`deal-pw-${h.region}`} />
       <SubmitBtn onClick={submit} disabled={busy || !price || !buyer || !pw} testid={`deal-submit-${h.region}`}>Record deal</SubmitBtn>
@@ -149,7 +149,7 @@ function AuctionRow({ h, onActed }: { h: Holding; onActed: () => void }) {
     <Row>
       <RegionTag region={h.region} count={h.count} />
       <NumIn label="Qty" value={qty} onChange={setQty} min={1} max={h.count} testid={`auction-qty-${h.region}`} />
-      <NumIn label="Reserve (optional)" value={reserve} onChange={setReserve} min={0} placeholder="none" testid={`auction-reserve-${h.region}`} />
+      <NumIn label="Reserve (optional)" value={reserve} onChange={setReserve} min={0} testid={`auction-reserve-${h.region}`} />
       <SubmitBtn onClick={submit} disabled={busy} testid={`auction-submit-${h.region}`}>Start auction</SubmitBtn>
       <Status msg={msg} err={err} />
     </Row>

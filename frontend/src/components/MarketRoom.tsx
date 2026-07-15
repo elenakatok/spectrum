@@ -176,7 +176,6 @@ export default function MarketRoom({ participantId, gameInstanceId }: { particip
             teamNumber={myTeam}
             teamPassword={me?.team_password ?? ''}
             synergy={me?.team_synergy ?? []}
-            endowmentRegions={me?.team_endowment_regions ?? []}
             teamState={liveState}
             holdings={holdings}
             openAuctions={openAuctions}

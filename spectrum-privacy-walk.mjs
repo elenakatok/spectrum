@@ -309,8 +309,41 @@ async function main() {
   const swR2 = [...world.regionsByTeam.get(BYS2)].sort().find((r) => r !== swR) ?? aRegionOf(world, BYS2)
   await callFn('executeSwap', asStudent(pidForTeam(world, BYS1), { regionX: swR, quantityX: 1, regionY: swR2, quantityY: 1, partnerTeam: BYS2, partnerPassword: passwordForTeam(world, BYS2) }))
 
+  // Engineer a visible 2-license BLOCK for a NON-party team (10) so the ownership board's block
+  // styling (item 3b) is exercised — every prior screenshot showed only the empty opening board.
+  // Actions are already done, so reassigning ownership here only affects what the board RENDERS.
+  // Pick a region that's neither under auction nor a transaction region, so the block cell is
+  // cleanly blue (not also locked) and no walked team's just-completed trade is disturbed.
+  const BLOCK_TEAM = 10
+  const allLic = (await fsGetDocs('licenses')).map((d) => ({
+    id: d.name.split('/').pop(), region: strVal(d.fields?.region),
+    auc: d.fields?.under_auction?.stringValue ?? null,
+  }))
+  const excluded = new Set([aucRegion, dealRegion, swR, swR2])
+  const blockRegion = [...new Set(allLic.map((l) => l.region))].sort()
+    .find((r) => !excluded.has(r) && allLic.filter((l) => l.region === r && !l.auc).length >= 2)
+  const blockLic = allLic.filter((l) => l.region === blockRegion && !l.auc).slice(0, 2)
+  for (const l of blockLic) await fsPatch(`licenses/${l.id}`, 'owner_team', { integerValue: String(BLOCK_TEAM) })
+  const aucLic = allLic.find((l) => l.auc)   // the license the live auction has locked
+  await sleep(1500)
+
   // Let every open page fetch fresh state (the auction is OPEN — bystanders call getAuctionState).
   for (const s of Object.values(studs)) await renderAllTabs(s)
+
+  // ── ITEM 3b — the ownership board renders the BLOCK (blue) + UNDER-AUCTION (🔒) states. ──
+  {
+    const viewer = studs[BYS1]   // team 6 — neither the block team nor the auction seller
+    await viewer.page.locator('[data-testid="tab-ownership"]').click()
+    await sleep(1200)
+    const bgOf   = (id) => viewer.page.locator(`[data-testid="own-${id}"]`).evaluate((el) => getComputedStyle(el).backgroundColor).catch(() => '')
+    const textOf = (id) => viewer.page.locator(`[data-testid="own-${id}"]`).innerText().catch(() => '')
+    const blocksBlue = (await Promise.all(blockLic.map((l) => bgOf(l.id)))).every((bg) => bg === 'rgb(238, 244, 255)')
+    assert(blockLic.length === 2 && blocksBlue, `ITEM 3b — a 2-license block (team ${BLOCK_TEAM}, Region ${blockRegion}) renders BLUE on the ownership board`)
+    const aucText = aucLic ? (await textOf(aucLic.id)).trim() : ''
+    const aucBg   = aucLic ? await bgOf(aucLic.id) : ''
+    assert(!!aucLic && aucText.includes('🔒') && aucBg === 'rgb(253, 226, 221)',
+      `ITEM 3b — the under-auction license renders the 🔒 lock marker + red tint (got "${aucText}", ${aucBg})`)
+  }
 
   // ── LEG 4 & LEG 1 (open-auction phase): reserve to nobody; bids/price to non-parties ──
   banner('THE PRIVACY WALK')
