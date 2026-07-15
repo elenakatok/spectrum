@@ -167,6 +167,16 @@ async function seedAndGroup() {
 
   const g = await callFn('groupParticipants', asDev({ num_teams: N_TEAMS }))
   assert(g.ok && g.result?.teams_created === N_TEAMS, `groupParticipants formed ${N_TEAMS} teams (efficient value ${g.result?.efficient_market_value})`)
+  // ITEM 2 — group_id now sorts in TEAM ORDER (team-01 … team-NN), so the shared roster's
+  // "Team #" column (numbered by group_id sort order) equals the real team_number instead of a
+  // meaningless UUID permutation. Assert the invariant that makes that column correct.
+  {
+    const gd = (await fsGetDocs('groups'))
+      .map((d) => ({ id: d.name.split('/').pop(), team: numVal(d.fields?.team_number) }))
+      .sort((a, b) => a.id.localeCompare(b.id))
+    const matches = gd.length === N_TEAMS && gd.every((x, i) => x.team === i + 1)
+    assert(matches, `ITEM 2 — group_id sort order == team_number (roster "Team #" correct): teams [${gd.map((x) => x.team).join(',')}]`)
+  }
   const s = await callFn('startMarket', asDev({}))
   assert(s.ok, 'startMarket opened the market')
   // 60s auction window: long enough that the pre-settle DOM walk (~25s) runs entirely while the

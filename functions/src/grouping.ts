@@ -24,7 +24,6 @@
 // private synergy + password live in groups/{gid}/truth/team (rules-denied), with a
 // server-stamped copy on each member's own participant doc for the student view.
 
-import { randomUUID } from 'crypto'
 import { onCall, HttpsError } from 'firebase-functions/v2/https'
 import * as admin from 'firebase-admin'
 import { FieldValue, Timestamp } from 'firebase-admin/firestore'
@@ -147,7 +146,10 @@ export function makeGroupParticipants(def: GameDefinition) {
         const g = team.teamNumber
         const members = membersByTeam[g - 1]
         const lead = members[0] ?? null
-        const groupId = randomUUID()
+        // group_id sorts in TEAM ORDER (team-01 … team-NN, N ≤ 26): the shared roster numbers
+        // groups by group_id sort order, so this makes its "Team #" column equal team_number
+        // (a random UUID made it a meaningless permutation). Opaque doc id everywhere else.
+        const groupId = `team-${String(g).padStart(2, '0')}`
         const licenseIds = licenses.filter((l) => l.ownerTeam === g).map((l) => l.licenseId)
         const endowmentRegionLetters = team.endowmentRegions.map(regionLetter)
 
