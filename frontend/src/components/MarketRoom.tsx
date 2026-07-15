@@ -59,8 +59,16 @@ export default function MarketRoom({ participantId, gameInstanceId }: { particip
   // ── Public live collections: licenses (ownership + auction discovery) + market clock ──
   useEffect(() => onSnapshot(inst('licenses'),
     (s) => setLicenses(s.docs.map((d) => d.data() as LicenseDoc))), [gameInstanceId])
-  useEffect(() => onSnapshot(doc(db, 'game_instances', gameInstanceId, 'market', 'state'),
-    (s) => setMarket((s.data() ?? {}) as MarketDoc)), [gameInstanceId])
+  useEffect(() => onSnapshot(doc(db, 'game_instances', gameInstanceId, 'market', 'state'), (s) => {
+    // opened_at/closes_at are stored as Firestore Timestamps; the clock + History elapsed need
+    // millis. (getMarketState converts for its own callers, but we read the raw doc here.)
+    const d = (s.data() ?? {}) as Record<string, unknown>
+    const ms = (v: unknown): number | null =>
+      v && typeof (v as { toMillis?: () => number }).toMillis === 'function'
+        ? (v as { toMillis: () => number }).toMillis()
+        : typeof v === 'number' ? v : null
+    setMarket({ status: d['status'] as string | undefined, opened_at: ms(d['opened_at']), closes_at: ms(d['closes_at']) })
+  }), [gameInstanceId])
 
   // ── 1-second clock tick (display only) ──
   useEffect(() => { const id = setInterval(() => setNow(Date.now()), 1000); return () => clearInterval(id) }, [])

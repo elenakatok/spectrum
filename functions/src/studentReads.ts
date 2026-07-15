@@ -48,6 +48,10 @@ export function makeGetTeamState(def: GameDefinition) {
     if (!t) throw new HttpsError('not-found', 'Team ledger not found.')
     const cash = Number(t['cash'] ?? 0)
     const escrowed = Number(t['escrowed'] ?? 0)
+    const portfolio = Number(t['portfolio_value'] ?? 0)
+    // license_value is DERIVED (portfolio − cash): the ledger's writeTeamState keeps
+    // portfolio_value fresh on every trade but never re-writes the stamped `license_value`
+    // field, so reading that field directly would go stale after the first trade.
     return {
       ok: true as const,
       team_number: teamNumber,
@@ -55,8 +59,8 @@ export function makeGetTeamState(def: GameDefinition) {
       escrowed,
       available: cash - escrowed,
       license_ids: (t['license_ids'] as string[] | undefined) ?? [],
-      license_value: Number(t['license_value'] ?? 0),
-      portfolio_value: Number(t['portfolio_value'] ?? 0),
+      license_value: portfolio - cash,
+      portfolio_value: portfolio,
     }
   })
 }
