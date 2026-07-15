@@ -167,9 +167,11 @@ async function spreadTimeline() {
 }
 
 // Fields WE add to a participant (seed + grouping) — deleted on restore to leave the instance bare.
-const SEEDED_FIELDS = ['role', 'role_assigned_at', 'attendance_confirmed_at', 'confirmed_ready_at',
+const SEEDED_FIELDS = ['role', 'role_assigned_at', 'attendance_confirmed_at', 'confirmed_ready_at', 'prep_status',
   'group_id', 'is_lead', 'team_number', 'team_password', 'team_synergy', 'team_endowment_regions',
-  'team_license_ids', 'team_cash', 'team_license_value', 'team_portfolio_value']
+  'team_license_ids', 'team_cash', 'team_license_value', 'team_portfolio_value',
+  // KC residue (Slice 5 verification leg) — cleaned so the instance returns fully bare.
+  'knowledge_check_completed_at', 'knowledge_check_score', 'knowledge_check_attempts', 'kc_static_answers']
 
 async function seedGroupable(pids) {
   const now = admin.firestore.FieldValue.serverTimestamp()
@@ -224,6 +226,29 @@ async function main() {
   const elig = ps.docs.filter((d) => d.data().role === 'trader' && d.data().attendance_confirmed_at != null).length
   const pres = Object.keys((await rtdb.ref(`presence/${GID}`).once('value')).val() ?? {}).length
   ok(elig >= N_TEAMS && pres >= N_TEAMS, `eligibility: ${elig} trader+attended, ${pres} present in RTDB`)
+
+  // ── KC (Slice 5) — the FOUR KC functions must RENDER and SUBMIT in prod (playbook failure
+  //    mode #7: render works but submit throws "not a valid graded KC question"). Drive one
+  //    seeded trader through the real deployed callables via a classroom-signed JWT. ──
+  {
+    console.log('\n  Knowledge Check (four functions, render + submit):')
+    const kcTok = signToken('student', pids[0], 'KC Smoke')
+    const prep = await callProd('getStudentPrepQuestions', { token: kcTok })
+    const kcQs = (prep.questions ?? []).filter((q) => /^kc_q\d+$/.test(q.field))
+    ok(kcQs.length === 13, `getStudentPrepQuestions renders the 13 graded questions (${kcQs.length})`)
+    ok(kcQs.every((q) => q.correct_value === undefined && q.grading === undefined), 'answer keys stripped pre-submit (no correct_value / grading reaches the client)')
+    // Gate (submitKnowledgeCheck) — writes knowledge_check_completed_at; required before statics.
+    const gate = await callProd('submitKnowledgeCheck', { token: kcTok, answer: 'trader' })
+    ok(gate.correct === true, `submitKnowledgeCheck passes the role gate (answer "trader" → correct)`)
+    // Statics (submitStaticKnowledgeCheckQuestion) — the failure-mode function; grades by value.
+    const q1 = await callProd('submitStaticKnowledgeCheckQuestion', { token: kcTok, field: 'kc_q1', answer: 'q1_sum' })
+    ok(q1.correct === true, `submitStaticKnowledgeCheckQuestion grades kc_q1 correct (NOT "not a valid graded KC question")`)
+    const q2 = await callProd('submitStaticKnowledgeCheckQuestion', { token: kcTok, field: 'kc_q2', answer: 'q2_610' })
+    ok(q2.correct === false, `submitStaticKnowledgeCheckQuestion grades a wrong answer as incorrect (kc_q2 → false)`)
+    // getDebriefQuestions — the fourth KC-content function; must resolve for the caller's role.
+    const debrief = await callProd('getDebriefQuestions', { token: kcTok })
+    ok(Array.isArray(debrief.questions), `getDebriefQuestions resolves (${debrief.questions?.length ?? 0} debrief questions)`)
+  }
 
   const browser = await chromium.launch({ headless: !HEADED })
   try {
