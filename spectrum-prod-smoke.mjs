@@ -1,5 +1,5 @@
 /**
- * Spectrum SLICE 3+4 — PRODUCTION smoke + student-tab & instructor-view screenshots.
+ * Spectrum SLICE 3+4+6 — PRODUCTION smoke + student-tab, instructor-view & REPORTS screenshots.
  *
  * Drives the DEPLOYED spectrum.mygames.live against the DEPLOYED callables, then captures the
  * five student tabs AND the five Slice-4 instructor views. Faithful path (no emulator): admin-seed
@@ -166,12 +166,102 @@ async function spreadTimeline() {
   await batch.commit()
 }
 
+// ── Slice 6: sculpt a DELIBERATELY SCATTERED market for the Report-3 screenshot ─────────
+// Report 3 measures how far each region ended from EFFICIENT CONCENTRATION. To make that legible
+// we sculpt three distinct region stories via admin owner_team writes (a VISUAL seed, like the
+// block above — wiped by restore; getMarketReport reads owner_team as the ownership truth):
+//   (1) one region CONSOLIDATED on its schedule-4 team → realized == efficient (1550), gap 0
+//   (2) one where a SECOND-HALF team holds a PARTIAL block (5 of 8) → realized well below efficient
+//   (3) one SPLIT several ways (2/2/2/1/1 across five weak teams) → large gap
+// Then we recompute each team's truth portfolio from the new holdings so the leaderboard (Report 1)
+// and ownership board stay CONSISTENT with the sculpted ownership (cash left as the trades left it).
+async function sculptScatteredMarket() {
+  const { assignedSchedule, valueOfHolding } = await import('./functions/lib/synergy.js')
+  const M = N_TEAMS / 2
+  const letter = (ri) => String.fromCharCode(64 + ri)
+  const ranking = (ri) => {   // teams by value(8) in region ri, strongest first (argmax = schedule-4)
+    const arr = []
+    for (let g = 1; g <= N_TEAMS; g++) arr.push([g, valueOfHolding(assignedSchedule(g, ri, M), 8)])
+    return arr.sort((a, b) => b[1] - a[1] || a[0] - b[0])
+  }
+  const lic = (await inst.collection('licenses').get()).docs.map((d) => ({
+    ref: d.ref, id: d.id, region: d.data().region, ri: d.data().region.charCodeAt(0) - 64,
+    auc: d.data().under_auction ?? null,
+  }))
+  const freeByRi = new Map()
+  for (const l of lic) { if (l.auc != null) continue; const a = freeByRi.get(l.ri) ?? []; a.push(l); freeByRi.set(l.ri, a) }
+  // Only sculpt regions whose 8 licenses are ALL free (avoid the mid-flight auction's locked license).
+  const fullRegions = [...freeByRi.entries()].filter(([, a]) => a.length === 8).map(([ri]) => ri).sort((a, b) => a - b)
+  const [consolidatedRi, partialRi, splitRi] = fullRegions
+
+  const batch = db.batch()
+  const story = []
+  if (consolidatedRi) {   // (1) all 8 → the schedule-4 team (value(8) = 1550) → gap 0
+    const team = ranking(consolidatedRi)[0][0]
+    for (const l of freeByRi.get(consolidatedRi)) batch.update(l.ref, { owner_team: team })
+    story.push(`Region ${letter(consolidatedRi)} consolidated on Team ${team} (all 8 → efficient, gap 0)`)
+  }
+  if (partialRi) {        // (2) 5 → the schedule-14 runner-up (2nd-half, 1465); the other 3 spread
+    const team = ranking(partialRi)[1][0]
+    const ls = freeByRi.get(partialRi)
+    ls.slice(0, 5).forEach((l) => batch.update(l.ref, { owner_team: team }))
+    const others = Array.from({ length: N_TEAMS }, (_, i) => i + 1).filter((g) => g !== team)
+    ls.slice(5).forEach((l, i) => batch.update(l.ref, { owner_team: others[i % others.length] }))
+    story.push(`Region ${letter(partialRi)} partial block: 2nd-half Team ${team} holds 5 of 8`)
+  }
+  if (splitRi) {          // (3) 2/2/2/1/1 across five NON-schedule-4 teams → large gap
+    const eff = ranking(splitRi)[0][0]
+    const holders = Array.from({ length: N_TEAMS }, (_, i) => i + 1).filter((g) => g !== eff).slice(0, 5)
+    const shares = [2, 2, 2, 1, 1]
+    const ls = freeByRi.get(splitRi)
+    let k = 0
+    holders.forEach((g, hi) => { for (let c = 0; c < shares[hi] && k < ls.length; c++, k++) batch.update(ls[k].ref, { owner_team: g }) })
+    story.push(`Region ${letter(splitRi)} split 2/2/2/1/1 across five teams`)
+  }
+  await batch.commit()
+  log('scattered market sculpted: ' + story.join(' · '))
+
+  // Recompute truth/group holdings + portfolio from the new ownership so Report 1 stays consistent.
+  const groups = await inst.collection('groups').get()
+  const licAfter = (await inst.collection('licenses').get()).docs.map((d) => ({ id: d.id, region: d.data().region, owner: d.data().owner_team }))
+  const tb = db.batch()
+  for (const g of groups.docs) {
+    const team = g.data().team_number
+    if (team == null) continue
+    const mine = licAfter.filter((l) => l.owner === team)
+    const byRi = new Map()
+    for (const l of mine) { const ri = l.region.charCodeAt(0) - 64; byRi.set(ri, (byRi.get(ri) ?? 0) + 1) }
+    let licVal = 0
+    for (const [ri, c] of byRi) licVal += valueOfHolding(assignedSchedule(team, ri, M), c)
+    const truthRef = g.ref.collection('truth').doc('team')
+    const cash = Number((await truthRef.get()).data()?.cash ?? 0)
+    const ids = mine.map((l) => l.id).sort()
+    tb.update(truthRef, { license_ids: ids, portfolio_value: cash + licVal })
+    tb.update(g.ref, { license_ids: ids })
+  }
+  await tb.commit()
+}
+
+// Seed finalize fields (admin) so the per-student report (getReportData: finalized_at + raw_score)
+// populates for the screenshot — WITHOUT triggering a real gradebook push. Cleaned on restore.
+async function seedFinalized(pids) {
+  const now = admin.firestore.FieldValue.serverTimestamp()
+  const kc = [0.6923076923076923, 1, 0]   // a small illustrative spread on the KC column
+  const batch = db.batch()
+  pids.forEach((pid, i) => batch.set(inst.collection('participants').doc(pid),
+    { finalized_at: now, raw_score: 1, knowledge_check_score: i < kc.length ? kc[i] : null }, { merge: true }))
+  await batch.commit()
+}
+
 // Fields WE add to a participant (seed + grouping) — deleted on restore to leave the instance bare.
 const SEEDED_FIELDS = ['role', 'role_assigned_at', 'attendance_confirmed_at', 'confirmed_ready_at', 'prep_status',
   'group_id', 'is_lead', 'team_number', 'team_password', 'team_synergy', 'team_endowment_regions',
   'team_license_ids', 'team_cash', 'team_license_value', 'team_portfolio_value',
   // KC residue (Slice 5 verification leg) — cleaned so the instance returns fully bare.
-  'knowledge_check_completed_at', 'knowledge_check_score', 'knowledge_check_attempts', 'kc_static_answers']
+  'knowledge_check_completed_at', 'knowledge_check_score', 'knowledge_check_attempts', 'kc_static_answers',
+  // Slice 6 Reports: finalize fields seeded so the per-student report (getReportData) populates
+  // WITHOUT a real gradebook push — cleaned on restore.
+  'finalized_at', 'raw_score']
 
 async function seedGroupable(pids) {
   const now = admin.firestore.FieldValue.serverTimestamp()
@@ -387,6 +477,52 @@ async function main() {
       log(`  📸 ${view} → ${file}`)
     }
     ok(true, 'five prod instructor view screenshots captured')
+
+    // ── Slice 6: REPORTS — sculpt a scattered market, then capture all five reports ─────────
+    console.log('\n  Reports page (Slice 6) — sculpt a scattered market, capture all five reports:')
+    await sculptScatteredMarket()
+    await seedFinalized(pids)
+
+    // Backend truth: getMarketReport reflects the scatter (efficient $1550 everywhere; ≥1 region
+    // consolidated at gap 0; ≥1 region with a wide gap) BEFORE we trust the rendered page.
+    const rep = await callProd('getMarketReport', { token: instrToken })
+    const regs = rep.regions ?? []
+    const gap0 = regs.filter((r) => r.gap === 0).length
+    const wide = regs.filter((r) => r.gap >= 400).length
+    ok(regs.length === N_TEAMS / 2 && regs.every((r) => r.efficient_value === 1550) && gap0 >= 1 && wide >= 1,
+      `getMarketReport Report 3: ${regs.length} regions · efficient $1550 · ${gap0} consolidated (gap 0) · ${wide} wide-gap`)
+    ok((rep.transactions ?? []).some((t) => t.type === 'deal' && t.acted_by_name),
+      'getMarketReport Report 4: the attributed ledger carries deals with team identity + actor name')
+
+    await instr.goto(`${BASE}/reports?token=${instrToken}&game_instance_id=${GID}&_session=tab`)
+    await instr.locator('[data-testid="report-tiles"]').waitFor({ timeout: 45_000 })
+    await sleep(5000)   // let getReportData/getLeaderboard/getTransactionGraph/getMarketReport resolve
+    await instr.screenshot({ path: path.join(SHOT_DIR, 'reports-overview.png'), fullPage: true })
+    log('  📸 reports overview')
+
+    const openReport = async (tileId, contentTestid, label) => {
+      await instr.locator(`[data-testid="report-tile-${tileId}"] button`).click().catch(() => {})
+      await instr.locator(`[data-testid="${contentTestid}"]`).waitFor({ timeout: 15_000 }).catch(() => {})
+      await sleep(1800)
+      await instr.screenshot({ path: path.join(SHOT_DIR, `reports-${label}.png`), fullPage: true })
+      log(`  📸 report ${label}`)
+      await instr.locator('button:has-text("✕")').first().click().catch(() => {})
+      await sleep(700)
+    }
+    await openReport('leaderboard', 'report-leaderboard', '1-leaderboard')
+    await openReport('history', 'report-history', '2-history')
+    await openReport('regions', 'report-regions', '3-regions')      // ← the focus
+    // Report 3 assertion on the RENDERED page: the gap-0 consolidated region row is present.
+    await instr.locator('[data-testid="report-tile-regions"] button').click().catch(() => {})
+    await instr.locator('[data-testid="report-regions-table"]').waitFor({ timeout: 15_000 }).catch(() => {})
+    const regionsText = await instr.locator('[data-testid="report-regions-table"]').innerText().catch(() => '')
+    ok(/Region [A-G]/.test(regionsText) && /\$1,?550/.test(regionsText),
+      `Report 3 renders per-region rows with the $1,550 efficient benchmark (${regionsText.split('\n').slice(0, 2).join(' / ').trim()})`)
+    await instr.locator('button:has-text("✕")').first().click().catch(() => {})
+    await sleep(700)
+    await openReport('per-team', 'report-per-team', '4-per-team')
+    await openReport('per-student', 'report-participation', '5-per-student')
+    ok(true, 'five prod REPORTS screenshots captured (Report 3 against the scattered market)')
   } finally {
     await browser.close().catch(() => {})
     if (!KEEP) await restore(pids)
