@@ -79,6 +79,23 @@ function GroupingPanel() {
     return () => { node.remove(); setHost(null) }
   }, [])
 
+  // Keep the shared dashboard tidy on EVERY re-render, not just the 1.5s poll: the shared roster
+  // re-renders on its own poll and React re-applies its inline style objects, which wiped the
+  // 1.5s-tidy's display:none (Show: filter) and text relabel (Group # → Team #) between ticks —
+  // the filter + old header visibly flashed back. A MutationObserver re-applies the tidy within a
+  // frame of any DOM change. We observe childList/subtree only (not attributes/characterData) and
+  // disconnect during the tidy, so the tidy's own style/text edits never retrigger it.
+  useEffect(() => {
+    const obs = new MutationObserver(() => {
+      obs.disconnect()
+      tidySharedDashboard()
+      obs.observe(document.body, { childList: true, subtree: true })
+    })
+    tidySharedDashboard()
+    obs.observe(document.body, { childList: true, subtree: true })
+    return () => obs.disconnect()
+  }, [])
+
   // Poll market state (drives button enablement) + keep the shared dashboard tidy.
   useEffect(() => {
     let alive = true
@@ -203,7 +220,7 @@ function GroupingPanel() {
           <span data-testid="market-progress" style={{ fontSize: '0.9rem', color: '#555' }}>
             Current Market Value <strong>{money(progress?.current)}</strong>
             {' · '}Efficiency captured <strong>{progress ? efficiencyPct(progress) : 0}%</strong>
-            {' '}<span style={{ color: '#888' }}>of Efficient Market Value {money(state?.efficient_market_value)}</span>
+            {' '}<span style={{ color: '#888' }}>of available gains from trade</span>
           </span>
         </div>
       )}

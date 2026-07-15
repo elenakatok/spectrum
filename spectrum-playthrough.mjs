@@ -77,26 +77,47 @@ const FILLER_PIDS = Array.from({ length: 10 }, (_, i) => `stu-${i + 6}`) // stu-
 const ALL_PIDS    = [...UI_PIDS, ...FILLER_PIDS]                   // 15 total
 const PRESENT_PIDS = [...UI_ATTEND, ...FILLER_PIDS]                // 14 present → grouped
 
-// ── KC skeleton: single-option gate + 2 PLACEHOLDER graded statics ──────────────
+// ── KC: single-option gate + 13 graded statics (Spectrum_KC_Questions_v3.md) ────
 // For each static, a UNIQUE substring of the CORRECT option label and of a WRONG option
-// label — the drive selects by TEXT so it is immune to the per-student option shuffle.
-// (Verbatim from gameDefinition.ts prepDefaults; these are PLACEHOLDERS replaced in Slice 6.)
-const KC_FIELDS  = ['kc_stub_one', 'kc_stub_two']
+// label — the drive selects by TEXT (hasText, case-insensitive substring on <label> only), so
+// it is immune to the per-student option shuffle AND independent of letter position. Verbatim
+// from gameDefinition.ts prepDefaults. Answer key: C·A·B·B·B·B·B·B·B·B·B·B·C.
+const KC_FIELDS = ['kc_q1', 'kc_q2', 'kc_q3', 'kc_q4', 'kc_q5', 'kc_q6', 'kc_q7', 'kc_q8', 'kc_q9', 'kc_q10', 'kc_q11', 'kc_q12', 'kc_q13']
 const KC_CORRECT = {
-  kc_stub_one: 'the correct placeholder answer',
-  kc_stub_two: 'The true placeholder statement',
+  kc_q1: 'sum value of your license',
+  kc_q2: '100', kc_q3: '250', kc_q4: '$90',
+  kc_q5: 'different chart, and your chart is private',
+  kc_q6: 'not official until it is reported',
+  kc_q7: 'privately enters their password to confirm',
+  kc_q8: 'first-price sealed-bid auction with a hard close',
+  kc_q9: 'no trade is recorded after the clock expires',
+  kc_q10: 'roughly five to eight',
+  kc_q11: 'wide gap between the highest and second-highest',
+  kc_q12: 'joint value creation through collaboration',
+  kc_q13: 'not mutually exclusive',
 }
 const KC_WRONG = {
-  kc_stub_one: 'A wrong placeholder answer',
-  kc_stub_two: 'A false placeholder statement',
+  kc_q1: 'the number of licenses you hold',
+  kc_q2: '610', kc_q3: '690', kc_q4: '$510',
+  kc_q5: 'posted on the market platform',
+  kc_q6: 'handshake agreement counts',
+  kc_q7: 'freely share passwords',
+  kc_q8: 'Vickrey',
+  kc_q9: 'instructor extends the market',
+  kc_q10: 'no upper limit',
+  kc_q11: 'value the asset identically',
+  kc_q12: 'standardized commodity',
+  kc_q13: 'Confidentiality favors auctions',
 }
-// Answer plan by pid: stu-1 → 1/2 (score 0.5); stu-2 → 0/2 (score 0); all others → 2/2 (1.0).
+// Answer plan by pid: stu-1 → Q1–Q9 correct, Q10–Q13 wrong (9/13); stu-2 → 0/13; others → 13/13.
 const KC_HALF_PID = UI_PIDS[0]   // stu-1
 const KC_ZERO_PID = UI_PIDS[1]   // stu-2
+const KC_HALF_CORRECT = KC_FIELDS.slice(0, 9)   // kc_q1 … kc_q9
+const KC_HALF_SCORE = KC_HALF_CORRECT.length / KC_FIELDS.length   // 9/13
 function kcPlanFor(pid) {
-  if (pid === KC_HALF_PID) return new Set(['kc_stub_one'])
+  if (pid === KC_HALF_PID) return new Set(KC_HALF_CORRECT)
   if (pid === KC_ZERO_PID) return new Set()
-  return new Set(KC_FIELDS)     // everyone else answers both correctly
+  return new Set(KC_FIELDS)     // everyone else answers all 13 correctly
 }
 
 // ── Tiny test harness ──────────────────────────────────────────────────────────
@@ -500,11 +521,11 @@ async function main() {
   assert(traderCount === UI_PIDS.length,
     `Roles assigned — all ${UI_PIDS.length} UI students launch as the single role \`trader\` (got ${traderCount})`)
 
-  // ── KC skeleton: gate seen + passed, both statics rendered, options shuffle per student ──
+  // ── KC: gate seen + passed, all 13 statics rendered + submitted, options shuffle per student ──
   assert(students.every(s => s.kc?.sawGate),
     `KC — every student saw the role gate ("What is your role in this market?") and passed on the first click`)
   assert(students.every(s => s.kc?.staticsSeen === KC_FIELDS.length),
-    `KC — both placeholder graded questions rendered + submitted for every UI student (got [${[...new Set(students.map(s => s.kc?.staticsSeen))].join(',')}])`)
+    `KC — all ${KC_FIELDS.length} graded questions rendered + submitted for every UI student (render+submit end-to-end) (got [${[...new Set(students.map(s => s.kc?.staticsSeen))].join(',')}])`)
   const kcFlat = s => KC_FIELDS.map(f => (s.kc?.orders?.[f] ?? []).join('|')).join(' || ')
   const sA = students.find(s => s.pid === 'stu-3'), sB = students.find(s => s.pid === 'stu-4')
   assert(sA && sB && kcFlat(sA) !== kcFlat(sB),
@@ -654,8 +675,13 @@ async function main() {
   assert(pushed.every(r => r.result.knowledge_check_score === null ||
       (typeof r.result.knowledge_check_score === 'number' && r.result.knowledge_check_score >= 0 && r.result.knowledge_check_score <= 1)),
     `Grade push — knowledge_check_score rides as its own 0–1 field on every record`)
-  assert(pushedById[KC_HALF_PID]?.knowledge_check_score === 0.5 && pushedById[KC_ZERO_PID]?.knowledge_check_score === 0,
-    `Grade push — the real KC values reach the gradebook (1/2 → 0.5, 0/2 → 0) [got ${pushedById[KC_HALF_PID]?.knowledge_check_score} / ${pushedById[KC_ZERO_PID]?.knowledge_check_score}]`)
+  const halfScore = pushedById[KC_HALF_PID]?.knowledge_check_score
+  assert(typeof halfScore === 'number' && Math.abs(halfScore - KC_HALF_SCORE) < 1e-9 && pushedById[KC_ZERO_PID]?.knowledge_check_score === 0,
+    `Grade push — the real KC values reach the gradebook keyed to the answer key (9/13 → ${KC_HALF_SCORE.toFixed(4)}, 0/13 → 0) [got ${halfScore} / ${pushedById[KC_ZERO_PID]?.knowledge_check_score}]`)
+  // A student who answered all 13 correctly scores a clean 1.0 (denominator = 13 graded statics).
+  const fullPid = UI_PIDS.find(p => p !== KC_HALF_PID && p !== KC_ZERO_PID)
+  assert(pushedById[fullPid]?.knowledge_check_score === 1,
+    `Grade push — an all-correct student scores 13/13 → 1.0 [${fullPid} got ${pushedById[fullPid]?.knowledge_check_score}]`)
 
   // PORTFOLIO / MARKET VALUE IS NOT IN THE PAYLOAD in ANY form — never graded.
   const valueLeak = pushed.find(r => {
@@ -685,8 +711,8 @@ async function main() {
 
   // ── KC values finalize correctly on the participant docs ──
   const kcOf = pid => byPidFinal[pid]?.knowledge_check_score
-  assert(kcOf(KC_HALF_PID) === 0.5,
-    `KC score — the 1-of-2 student ${KC_HALF_PID} finalizes with knowledge_check_score 0.5 (got ${kcOf(KC_HALF_PID)})`)
+  assert(typeof kcOf(KC_HALF_PID) === 'number' && Math.abs(kcOf(KC_HALF_PID) - KC_HALF_SCORE) < 1e-9,
+    `KC score — the 9-of-13 student ${KC_HALF_PID} finalizes with knowledge_check_score ${KC_HALF_SCORE.toFixed(4)} (got ${kcOf(KC_HALF_PID)})`)
   assert(kcOf(KC_ZERO_PID) === 0,
     `KC score — the all-wrong student ${KC_ZERO_PID} STILL finalizes, score 0 (a wrong answer never blocks) (got ${kcOf(KC_ZERO_PID)})`)
   assert(kcOf('stu-3') === 1,

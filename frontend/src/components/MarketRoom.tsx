@@ -123,8 +123,13 @@ export default function MarketRoom({ participantId, gameInstanceId }: { particip
   )
 
   const status = market?.status ?? 'grouped'
-  const marketOpen = status === 'open'
   const timeLeft = market?.closes_at ? market.closes_at - now : null
+  // HARD CLOSE (v3 §9.2): at the deadline the market is closed even before the server flips the
+  // status doc — so the clock reads "Market closed" (not "0:00 left") and the trade forms lock.
+  // The server rejects any late trade regardless; this just keeps the UI honest at the bell.
+  const deadlinePassed = timeLeft != null && timeLeft <= 0
+  const marketOpen = status === 'open' && !deadlinePassed
+  const marketClosed = status === 'closed' || (status === 'open' && deadlinePassed)
 
   // Effective team state: live getTeamState once loaded, else the participant-doc opening
   // snapshot (instant, correct until the first trade — then getTeamState takes over).
@@ -154,7 +159,7 @@ export default function MarketRoom({ participantId, gameInstanceId }: { particip
       <div style={{ display: 'flex', alignItems: 'baseline', justifyContent: 'space-between', flexWrap: 'wrap', gap: spacing.gapMd, marginBottom: spacing.gapSm }}>
         <h1 style={{ margin: 0, fontSize: '1.4rem' }}>Spectrum — Team {myTeam}</h1>
         <div style={{ fontSize: '0.9rem', color: marketOpen ? '#137333' : colors.textSecondary, fontWeight: 600 }} data-testid="market-clock">
-          {status === 'closed' ? 'Market closed'
+          {marketClosed ? 'Market closed'
             : marketOpen ? `● Market open${timeLeft != null ? ` · ${clock(timeLeft)} left` : ''}`
             : 'Waiting for the market to open'}
         </div>

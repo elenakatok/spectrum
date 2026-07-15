@@ -63,8 +63,16 @@ export async function readHoldings(tx: Tx, instanceRef: Ref, teamNumber: number)
 
 export async function requireMarketOpen(instanceRef: Ref): Promise<void> {
   const snap = await instanceRef.collection('market').doc('state').get()
-  if ((snap.data()?.['status'] as string | undefined) !== 'open') {
+  const d = snap.data()
+  if ((d?.['status'] as string | undefined) !== 'open') {
     throw new HttpsError('failed-precondition', 'The market is not open.')
+  }
+  // HARD CLOSE (v3 §9.2, KC Q9): the deadline is server-authoritative. A trade submitted after
+  // closes_at is rejected even while the status doc still reads 'open' — enforcement does NOT wait
+  // for the resolve-on-read flip in getMarketState. A deal at closes_at + 0.1s is rejected, not honored.
+  const closesAt = (d?.['closes_at'] as Timestamp | undefined)?.toMillis?.()
+  if (closesAt != null && Timestamp.now().toMillis() >= closesAt) {
+    throw new HttpsError('failed-precondition', 'The market has closed.')
   }
 }
 

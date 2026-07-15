@@ -313,9 +313,19 @@ export function makeGetMarketState(def: GameDefinition) {
       return { ok: true as const, status: 'setup' as const }
     }
     const s = snap.data() as Record<string, unknown>
+    // Resolve-on-read HARD CLOSE (v3 §9.2): once past closes_at, flip 'open' → 'closed' so the
+    // dashboard + students' onSnapshot show the closed market. This is cosmetic — the ledger's
+    // requireMarketOpen already rejects trades past closes_at regardless of this flip. Idempotent
+    // (only flips while still 'open'); the instructor poll triggers it within a tick of the deadline.
+    let status = s['status'] as string
+    const closesAtMs = (s['closes_at'] as Timestamp | null)?.toMillis?.() ?? null
+    if (status === 'open' && closesAtMs != null && Timestamp.now().toMillis() >= closesAtMs) {
+      await stateRef.update({ status: 'closed' })
+      status = 'closed'
+    }
     return {
       ok: true as const,
-      status: s['status'] as string,
+      status,
       num_teams: (s['num_teams'] as number) ?? null,
       num_regions: (s['num_regions'] as number) ?? null,
       efficient_market_value: (s['efficient_market_value'] as number) ?? null,

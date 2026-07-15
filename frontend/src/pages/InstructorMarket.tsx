@@ -71,9 +71,12 @@ function Dashboard({ gameInstanceId }: { gameInstanceId: string }) {
   useEffect(() => { const id = setInterval(() => setNow(Date.now()), 1000); return () => clearInterval(id) }, [])
 
   const status = market?.status ?? 'grouped'
-  const marketOpen = status === 'open'
   const timeLeft = market?.closes_at ? market.closes_at - now : null
-  const clockText = status === 'closed' ? 'Market closed'
+  // HARD CLOSE (v3 §9.2): read "Market closed" at the deadline even before the server flips status.
+  const deadlinePassed = timeLeft != null && timeLeft <= 0
+  const marketOpen = status === 'open' && !deadlinePassed
+  const marketClosed = status === 'closed' || (status === 'open' && deadlinePassed)
+  const clockText = marketClosed ? 'Market closed'
     : marketOpen ? `● Market open${timeLeft != null ? ` · ${clock(timeLeft)} left` : ''}`
     : 'Waiting for the market to open'
 
@@ -122,7 +125,13 @@ function PerformanceView() {
   if (!board) return <p style={{ color: colors.textSecondary }}>Loading…</p>
 
   const eff = board.efficient_market_value
-  const pct = eff > 0 ? Math.round((board.value_after_trade / eff) * 100) : null
+  // ONE efficiency measure everywhere (matches the dashboard): efficiency captured = gains
+  // realized / gains available = (achieved − initial) / (efficient − initial). Starts at 0% at
+  // open and climbs toward 100% as the class finds gains from trade — what the game teaches.
+  // (NOT achieved/efficient, which sits ~79% before any trade and barely moves — misleading.)
+  const captured = eff > board.total_initial_value
+    ? Math.round(((board.value_after_trade - board.total_initial_value) / (eff - board.total_initial_value)) * 100)
+    : 0
 
   return (
     <section data-testid="performance-view">
@@ -130,7 +139,7 @@ function PerformanceView() {
       <div style={{ display: 'flex', flexWrap: 'wrap', gap: spacing.gapMd, marginBottom: spacing.gapMd }}>
         <Stat label="Efficient Market Value" value={money(eff)} testid="efficient-market-value" hint="the ceiling if every license landed on its best-fit team" />
         <Stat label="Total Initial Value" value={money(board.total_initial_value)} testid="total-initial-value" hint="portfolios at grouping, before any trade" />
-        <Stat label="Value After Trade" value={money(board.value_after_trade)} testid="value-after-trade" hint={pct != null ? `${pct}% of efficient` : undefined} />
+        <Stat label="Value After Trade" value={money(board.value_after_trade)} testid="value-after-trade" hint={`Efficiency captured: ${captured}% of available gains from trade`} />
       </div>
 
       <div style={{ overflowX: 'auto' }}>

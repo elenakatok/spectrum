@@ -651,7 +651,10 @@ async function main() {
       auctions: [{ id: 'A', region: 'C', quantity: 1, seller_team: 1, reserve: RESERVE, license_ids: ['C1'], ends_at_ms: 9_999_999_999_999, status: 'open' }],
       bids: [{ auction_id: 'A', team_number: 2, amount: BID2, at_ms: 100 }, { auction_id: 'A', team_number: 3, amount: BID3, at_ms: 200 }],
     })
-    const hasNum = (obj, n) => JSON.stringify(obj).includes(String(n))
+    // Neutralize the volatile PUBLIC time_remaining_ms (a ~13-digit countdown off `now`) before
+    // the substring grep — otherwise a distinctive 3-digit value (317/411/522) can randomly appear
+    // INSIDE it and false-fail. Same class as the privacy-walk scrub / the Timestamp gotcha.
+    const hasNum = (obj, n) => JSON.stringify({ ...obj, time_remaining_ms: 0 }).includes(String(n))
     // LIVE: a non-bidding team sees nothing sensitive.
     const live4 = await getAuctionState('p-4', 'A')
     assert(live4.ok && !hasNum(live4.result, RESERVE) && !hasNum(live4.result, BID2) && !hasNum(live4.result, BID3),
@@ -693,6 +696,41 @@ async function main() {
     assert(seller.result.clearing_price === BID3, `S8f: SELLER (a party) learns the sale price (${BID3})`)
     assert(!hasNum(np.result, RESERVE) && !hasNum(winner.result, RESERVE) && !hasNum(seller.result, RESERVE),
       `S8g: the RESERVE (${RESERVE}) leaks to NOBODY — not winner, not seller, not non-party`)
+  }
+
+  // ══ S9 — HARD CLOSE (v3 §9.2, KC Q9): the deadline is server-authoritative ══
+  banner('S9 — hard close: trades rejected past closes_at; getMarketState flips open → closed')
+  {
+    // Counterfactual: an OPEN market (closes well ahead) accepts the deal.
+    await seed({
+      closes_in_ms: 600_000,
+      teams: [
+        { team_number: 1, members: ['p-1'], cash: 1000, password: PW(1) },
+        { team_number: 2, members: ['p-2'], cash: 10000, password: PW(2) },
+      ],
+      licenses: [{ id: 'C1', region: 'C', owner_team: 1 }],
+    })
+    assert((await deal('p-1', 'C', 1, 300, 2, PW(2))).ok, `S9a: a deal on an OPEN market (closes +10min) is accepted`)
+
+    // Past the deadline: the same deal is REJECTED even while the status doc still reads 'open'.
+    await seed({
+      closes_in_ms: -3000,
+      teams: [
+        { team_number: 1, members: ['p-1'], cash: 1000, password: PW(1) },
+        { team_number: 2, members: ['p-2'], cash: 10000, password: PW(2) },
+      ],
+      licenses: [{ id: 'C1', region: 'C', owner_team: 1 }],
+    })
+    const preStatus = strVal((await fsGet('market/state')).fields.status)
+    const rClosed = await deal('p-1', 'C', 1, 300, 2, PW(2))
+    assert(!rClosed.ok && /market has closed/i.test(rClosed.error ?? ''),
+      `S9b: past closes_at, the deal is REJECTED "market has closed" while the doc still read '${preStatus}' [${rClosed.error}]`)
+    assert((await heldInRegion(1, 'C')) === 1, `S9b: the rejected late deal moved NOTHING (seller still holds 1 in C)`)
+
+    // Resolve-on-read: getMarketState flips the doc 'open' → 'closed' and it persists.
+    const gm = await callFn('getMarketState', { _dev: { game_instance_id: GID } })
+    assert(gm.ok && gm.result.status === 'closed', `S9c: getMarketState flips the market 'open' → 'closed' past the deadline [${gm.result?.status}]`)
+    assert(strVal((await fsGet('market/state')).fields.status) === 'closed', `S9c: the flip persisted to the state doc`)
   }
 
   banner(`RESULT — ${PASS}/${PASS + FAIL} green${FAIL ? `  (${FAIL} FAILED)` : ''}`)
