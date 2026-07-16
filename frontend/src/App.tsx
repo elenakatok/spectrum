@@ -5,6 +5,7 @@ import InstructorDashboard from './pages/InstructorDashboard'
 import InstructorMarket from './pages/InstructorMarket'
 import Configure from './pages/Configure'
 import Reports from './pages/Reports'
+import Projection from './pages/Projection'
 import { SettingsPage } from '@mygames/game-ui'
 
 const spectrumRoleLabels: Record<string, string> = {
@@ -41,6 +42,7 @@ export default function App() {
         <Route path="/"          element={<Play />} />
         <Route path="/dashboard" element={<InstructorDashboard />} />
         <Route path="/market"    element={<InstructorMarket />} />
+        <Route path="/project"   element={<Projection />} />
         <Route path="/configure" element={<Configure />} />
         <Route path="/reports"   element={<Reports />} />
         <Route path="/settings"  element={

@@ -111,6 +111,22 @@ async function seedActivity(pids, teamOf, pwOf, instrToken) {
     await callProd('executeDeal', { token: tokenOfTeam(s), region, quantity: 1, price, buyerTeam: b, buyerPassword: pwOf.get(b) })
     done.push(`deal T${s}→T${b} ${region} $${price}`)
   }
+  // Multi-unit deal — a LOT of 2 licenses for $300 → $150/license. Proves the TRUE unit price
+  // (bug D/E): Report 2's "Price / license" reads $150 (not the $300 lot) and the graph plots $150.
+  let unitDeal = null
+  for (const s of [2, 4, 6, 8, 10, 12]) {
+    const ls = (await inst.collection('licenses').where('owner_team', '==', s).get()).docs
+      .map((d) => d.data()).filter((l) => l.under_auction == null)
+    const byReg = new Map()
+    for (const l of ls) { const a = byReg.get(l.region) ?? []; a.push(l); byReg.set(l.region, a) }
+    const reg = [...byReg.entries()].find(([, a]) => a.length >= 2)?.[0]
+    if (!reg) continue
+    const buyer = 14
+    await callProd('executeDeal', { token: tokenOfTeam(s), region: reg, quantity: 2, price: 300, buyerTeam: buyer, buyerPassword: pwOf.get(buyer) })
+    unitDeal = { seller: s, buyer, region: reg, lot: 300, unit: 150 }
+    done.push(`UNIT deal T${s}→T${buyer} ${reg} ×2 $300 ($150/lic)`)
+    break
+  }
   // Swap — team 9 ↔ team 10 (price-less strip).
   const r9 = await freeRegionOf(9), r10 = await freeRegionOf(10)
   if (r9 && r10 && r9 !== r10) {
@@ -160,6 +176,7 @@ async function seedActivity(pids, teamOf, pwOf, instrToken) {
     done.push(`auction T11→T12 ${settledAuc.region} $305 settled`)
   }
   log('seeded: ' + done.join(' · '))
+  return { unitDeal }
 }
 
 // Spread transaction timestamps across a ~38-min elapsed window and backdate opened_at, so the
@@ -411,7 +428,7 @@ async function main() {
     // ── Seed a spread of activity so the graph/ownership/leaderboard capture is POPULATED ──
     // (deals + swap + a settled auction + a mid-flight auction + a block; seedActivity manages
     // the short-vs-long auction windows itself). Adds a ~35s wait for the short auction to end.
-    await seedActivity(pids, teamOf, pwOf, instrToken)
+    const { unitDeal } = await seedActivity(pids, teamOf, pwOf, instrToken)
 
     const mePid = pids.find((p) => teamOf.get(p) === 1)
     const meTeam = teamOf.get(mePid)
@@ -498,12 +515,31 @@ async function main() {
       if (view === 'ownership') {
         const board = await instr.locator('[data-testid="ownership-board"]').innerText().catch(() => '')
         ok(board.includes('🔒'), 'ownership board shows the under-auction 🔒 marker (mid-flight auction)')
+        ok((await instr.locator('[data-testid="project-ownership"]').count()) === 1, 'ownership view has a Project button (projection feature)')
+      }
+      if (view === 'graph') {
+        ok((await instr.locator('[data-testid="project-graph"]').count()) === 1, 'graph view has a Project button (projection feature)')
       }
       const file = path.join(SHOT_DIR, `instructor-${view}.png`)
       await instr.screenshot({ path: file, fullPage: true })
       log(`  📸 ${view} → ${file}`)
     }
     ok(true, 'five prod instructor view screenshots captured')
+
+    // ── Projection (dry-run feature) — the /project route renders the LIVE board/graph full-screen.
+    // In real use the "Project" buttons window.open this in a SEPARATE window; here we navigate the
+    // same tab (it reuses the established instructor session) to prove the surface renders live. ──
+    console.log('\n  Projection — full-screen live ownership + graph surfaces:')
+    await instr.goto(`${BASE}/project?view=ownership&token=${instrToken}&game_instance_id=${GID}&_session=tab`)
+    const projOwn = await instr.locator('[data-testid="projection"] [data-testid="ownership-board"]').waitFor({ timeout: 30_000 }).then(() => true).catch(() => false)
+    ok(projOwn, 'projection /project?view=ownership renders the LIVE ownership board full-screen')
+    await instr.screenshot({ path: path.join(SHOT_DIR, 'projection-ownership.png'), fullPage: true })
+    log('  📸 projection ownership')
+    await instr.goto(`${BASE}/project?view=graph&token=${instrToken}&game_instance_id=${GID}&_session=tab`)
+    const projGraph = await instr.locator('[data-testid="projection"] [data-testid="transaction-graph"]').waitFor({ timeout: 30_000 }).then(() => true).catch(() => false)
+    ok(projGraph, 'projection /project?view=graph renders the LIVE transaction graph full-screen')
+    await instr.screenshot({ path: path.join(SHOT_DIR, 'projection-graph.png'), fullPage: true })
+    log('  📸 projection graph')
 
     // ── Slice 6: REPORTS — sculpt a scattered market, then capture all five reports ─────────
     console.log('\n  Reports page (Slice 6) — sculpt a scattered market, capture all five reports:')
@@ -520,6 +556,13 @@ async function main() {
       `getMarketReport Report 3: ${regs.length} regions · efficient $1550 · ${gap0} consolidated (gap 0) · ${wide} wide-gap`)
     ok((rep.transactions ?? []).some((t) => t.type === 'deal' && t.acted_by_name),
       'getMarketReport Report 4: the attributed ledger carries deals with team identity + actor name')
+    // Bug D/E — the multi-unit lot: $300 for 2 licenses is attributed to both parties and prices
+    // per-license at $150 (lot ÷ quantity). The backend truth behind the Report-2 table + graph.
+    if (unitDeal) {
+      const ud = (rep.transactions ?? []).find((t) => t.type === 'deal' && t.quantity === 2 && t.price === 300)
+      ok(ud && ud.from_team === unitDeal.seller && ud.to_team === unitDeal.buyer,
+        `Report 2/D — the 2-license lot is attributed & priced (Team ${unitDeal.seller}→${unitDeal.buyer}, $300 lot ÷ 2 = $150/license)`)
+    }
 
     // A projector-height viewport so the modal renders tall enough to prove Report 2's table body
     // scrolls into view (Slice-7 cleanup 2), not just the header, in the fullPage screenshot.
@@ -528,12 +571,13 @@ async function main() {
     await instr.locator('[data-testid="report-tiles"]').waitFor({ timeout: 45_000 })
     await sleep(5000)   // let getReportData/getLeaderboard/getTransactionGraph/getMarketReport resolve
 
-    // Slice-7 cleanup 1: the Phase-A placeholder prep tile is GONE — the overview shows exactly the
-    // five real reports and no "No responses yet" free-text card.
+    // The overview shows exactly the FOUR real reports — no placeholder card, and the per-student
+    // report is GONE (bug G: redundant with the gradebook).
     const tileCount = await instr.locator('[data-testid^="report-tile-"]').count()
     const overviewText = await instr.locator('[data-testid="report-tiles"]').innerText().catch(() => '')
-    ok(tileCount === 5 && !/PLACEHOLDER|No responses yet|going-in strategy/i.test(overviewText),
-      `Reports overview shows exactly the 5 real reports, no placeholder free-text tile (${tileCount} tiles)`)
+    const perStudentGone = (await instr.locator('[data-testid="report-tile-per-student"]').count()) === 0
+    ok(tileCount === 4 && perStudentGone && !/PLACEHOLDER|No responses yet|going-in strategy/i.test(overviewText),
+      `Reports overview shows exactly the 4 real reports, per-student removed, no placeholder tile (${tileCount} tiles)`)
 
     await instr.screenshot({ path: path.join(SHOT_DIR, 'reports-overview.png'), fullPage: true })
     log('  📸 reports overview')
@@ -555,6 +599,11 @@ async function main() {
     await sleep(1500)
     const rowVisible = await instr.locator('[data-testid="report-history-row-0"]').isVisible().catch(() => false)
     ok(rowVisible, 'Report 2 transaction table renders its rows (first ledger row visible in the modal, not just the header)')
+    // Bugs D/E on the RENDERED table: both parties + the true per-license price.
+    const histText = await instr.locator('[data-testid="report-history-table"]').innerText().catch(() => '')
+    ok(/Seller/.test(histText) && /Buyer/.test(histText), 'Report 2 table has Buyer + Seller columns (bug D)')
+    ok(/\$150\b/.test(histText) && /\$300\b/.test(histText),
+      'Report 2 renders the 2-license lot as $300 (lot) / $150 (per license) — true unit price (bug D/E)')
     await instr.screenshot({ path: path.join(SHOT_DIR, 'reports-2-history.png'), fullPage: true })
     log('  📸 report 2-history')
     await instr.locator('button:has-text("✕")').first().click().catch(() => {})
@@ -569,8 +618,7 @@ async function main() {
     await instr.locator('button:has-text("✕")').first().click().catch(() => {})
     await sleep(700)
     await openReport('per-team', 'report-per-team', '4-per-team')
-    await openReport('per-student', 'report-participation', '5-per-student')
-    ok(true, 'five prod REPORTS screenshots captured (Report 3 against the scattered market)')
+    ok(true, 'four prod REPORTS screenshots captured (Report 3 against the scattered market)')
 
     // ── Dry-run item 1 PROOF: the instructor session OUTLIVES the one-time launch token ─────────
     // The classroom JWT expires in ~15 min; a market runs 90. Before the fix, opening /market (the

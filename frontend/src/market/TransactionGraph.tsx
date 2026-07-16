@@ -20,8 +20,8 @@ const PLOT_H = H - M.top - M.bottom
 const STRIP_H = 26 // the price-less swap band, just below the X axis
 
 export default function TransactionGraph({
-  points, openedAt, nowMs,
-}: { points: GraphPoint[]; openedAt: number | null; nowMs: number }) {
+  points, openedAt, closesAt,
+}: { points: GraphPoint[]; openedAt: number | null; closesAt: number | null }) {
   const { priced, swaps, regions, colourOf, maxMin, maxPrice } = useMemo(() => {
     const withElapsed = points
       .filter((p) => p.at_ms != null && openedAt != null)
@@ -30,11 +30,15 @@ export default function TransactionGraph({
     const swaps = withElapsed.filter((p) => p.type === 'swap')
     const regions = [...new Set(points.map((p) => p.region).filter((r): r is string => !!r))].sort((a, b) => a.localeCompare(b))
     const colourOf = (r: string | null) => (r == null ? '#999' : PALETTE[regions.indexOf(r) % PALETTE.length])
-    const nowMin = openedAt != null ? Math.max(0, (nowMs - openedAt) / 60000) : 0
-    const maxMin = Math.max(1, nowMin, ...withElapsed.map((p) => p.min))
+    // X-axis spans the FULL market length (closes_at − opened_at) — NOT wall-clock "now" (bug A).
+    // So a 90-minute market always draws a 0–90 axis and every dot lands where it truly happened,
+    // instead of being crushed into the left tenth by a runaway "minutes since open" max. Still
+    // Math.max with the data so a late/edge transaction is never clipped off the right edge.
+    const marketLenMin = closesAt != null && openedAt != null ? (closesAt - openedAt) / 60000 : 0
+    const maxMin = Math.max(1, marketLenMin, ...withElapsed.map((p) => p.min))
     const maxPrice = Math.max(100, ...priced.map((p) => p.price_per_license!)) * 1.08
     return { priced, swaps, regions, colourOf, maxMin, maxPrice }
-  }, [points, openedAt, nowMs])
+  }, [points, openedAt, closesAt])
 
   const x = (min: number) => M.left + (min / maxMin) * PLOT_W
   const y = (price: number) => M.top + PLOT_H - (price / maxPrice) * PLOT_H
@@ -51,8 +55,11 @@ export default function TransactionGraph({
         <span style={{ fontSize: '0.8rem', color: colors.textSecondary }}>Instructor only · price per license over time</span>
       </div>
 
-      <div style={{ overflowX: 'auto' }}>
-        <svg width={W} height={H} role="img" aria-label="Transaction price per license over time" style={{ maxWidth: '100%', height: 'auto' }}>
+      <div style={{ overflow: 'auto', maxHeight: '78vh' }}>
+        {/* viewBox (not fixed width/height) so the whole chart — including the swap strip below the
+            axis — scales to fit the container and is NEVER clipped at the bottom (bug E). width:100%
+            makes it fill the dashboard/projection surface; on the report it fills the capped box. */}
+        <svg viewBox={`0 0 ${W} ${H}`} width="100%" preserveAspectRatio="xMidYMid meet" role="img" aria-label="Transaction price per license over time" style={{ display: 'block', width: '100%', height: 'auto' }}>
           {/* Y grid + ticks (price per license) */}
           {yTicks.map((t, i) => (
             <g key={`y${i}`}>

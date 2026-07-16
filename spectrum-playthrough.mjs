@@ -716,12 +716,14 @@ async function main() {
   assert(kcOf('stu-3') === 1,
     `KC score — an all-correct student (stu-3) finalizes with score 1.0 (got ${kcOf('stu-3')})`)
 
-  // ── Reports page loads for the skeleton (per-student participation + KC) ──
-  banner('Reports — instructor Reports page loads (per-student participation + KC)')
+  // ── Reports page loads (four instructor reports; per-student removed — bug G) ──
+  banner('Reports — instructor Reports page loads (leaderboard / history / regions / per-team)')
   await dash.goto(`${FE}/reports?_dev_game_instance_id=${encodeURIComponent(GID)}&_session=tab`)
   await dash.waitForSelector('h2:has-text("Reports — Spectrum")', { timeout: 30_000 })
-  const reportsLoaded = await dash.getByText(/finalized/i).first().waitFor({ timeout: 20_000 }).then(() => true).catch(() => false)
-  assert(reportsLoaded, `Reports — the per-student report tile loads for the finalized skeleton instance`)
+  const reportsLoaded = await dash.locator('[data-testid="report-tile-leaderboard"]').waitFor({ timeout: 20_000 }).then(() => true).catch(() => false)
+  assert(reportsLoaded, `Reports — the leaderboard report tile loads for the finalized skeleton instance`)
+  const noPerStudent = (await dash.locator('[data-testid="report-tile-per-student"]').count()) === 0
+  assert(noPerStudent, `Reports — the per-student report tile is GONE (bug G: redundant with the gradebook)`)
 }
 
 // ── Entry point ─────────────────────────────────────────────────────────────────

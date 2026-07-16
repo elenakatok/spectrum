@@ -101,14 +101,37 @@ function Dashboard({ gameInstanceId }: { gameInstanceId: string }) {
       <div style={{ paddingTop: spacing.gapMd }}>
         {view === 'performance' && <PerformanceView />}
         {view === 'ownership' && (
-          <OwnershipBoard licenses={licenses} title="Ownership"
-            headerRight={<span data-testid="ownership-clock" style={{ fontSize: '0.9rem', fontWeight: 600, color: marketOpen ? '#137333' : colors.textSecondary }}>{clockText}</span>} />
+          <>
+            <ProjectButton view="ownership" label="Project the ownership board" />
+            <OwnershipBoard licenses={licenses} title="Ownership"
+              headerRight={<span data-testid="ownership-clock" style={{ fontSize: '0.9rem', fontWeight: 600, color: marketOpen ? '#137333' : colors.textSecondary }}>{clockText}</span>} />
+          </>
         )}
         {view === 'graph' && <GraphView />}
         {view === 'teams' && <TeamsView gameInstanceId={gameInstanceId} />}
         {view === 'quiz' && <QuizView />}
       </div>
     </main>
+  )
+}
+
+// ── Project control — opens the LIVE board/graph full-screen in a SEPARATE window (reuses the
+// attendance-code projection mechanism: window.open, room-sized), carrying the same session params
+// so the projection window establishes its own instructor session. The dashboard window is left
+// intact on the laptop; the instructor drags the projection window to the projector. ──────────────
+function ProjectButton({ view, label }: { view: 'ownership' | 'graph'; label: string }) {
+  const project = () => {
+    const params = window.location.search ? '&' + window.location.search.slice(1) : ''
+    window.open(`/project?view=${view}${params}`, `spectrum-projection-${view}`,
+      'width=1280,height=800,menubar=no,toolbar=no,location=no,status=no')
+  }
+  return (
+    <div style={{ marginBottom: spacing.gapSm }}>
+      <button data-testid={`project-${view}`} onClick={project}
+        style={{ fontSize: '0.9rem', fontWeight: 600, color: '#fff', background: '#D38626', border: 'none', borderRadius: 6, padding: '0.4rem 0.9rem', cursor: 'pointer' }}>
+        ⛶ {label} ↗
+      </button>
+    </div>
   )
 }
 
@@ -170,17 +193,20 @@ function PerformanceView() {
 // ── View 3: Transaction Graph (getTransactionGraph — instructor only) ─────────────────
 function GraphView() {
   const [graph, setGraph] = useState<TxGraph | null>(null)
-  const [now, setNow] = useState(() => Date.now())
   const [err, setErr] = useState('')
   const refresh = useCallback(() => {
     getTransactionGraph().then(setGraph).catch((e: unknown) => setErr(e instanceof Error ? e.message : 'Load failed.'))
   }, [])
   useEffect(() => { refresh(); const id = setInterval(refresh, 5000); return () => clearInterval(id) }, [refresh])
-  useEffect(() => { const id = setInterval(() => setNow(Date.now()), 1000); return () => clearInterval(id) }, [])
 
   if (err) return <p style={{ color: '#b3261e' }} data-testid="graph-error">{err}</p>
   if (!graph) return <p style={{ color: colors.textSecondary }}>Loading…</p>
-  return <TransactionGraph points={graph.points} openedAt={graph.opened_at} nowMs={now} />
+  return (
+    <>
+      <ProjectButton view="graph" label="Project the transaction graph" />
+      <TransactionGraph points={graph.points} openedAt={graph.opened_at} closesAt={graph.closes_at} />
+    </>
+  )
 }
 
 // ── View 4: Teams (getRoster + public groups, joined on the client per Elena's choice) ─

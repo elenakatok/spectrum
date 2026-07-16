@@ -6,33 +6,26 @@ import { auth, functions } from '../firebase'
 import {
   SortableTable,
   GameHeader,
-  ExportModal,
-  buildStudentTextExport,
   type SortableColumn,
   type ReportTileConfig,
-  type AiTextRow,
 } from '@mygames/game-ui'
 import {
   getLeaderboard, getTransactionGraph, getMarketReport,
-  type ReportData, type StudentReportRow,
   type Leaderboard, type TransactionGraph as TxGraph, type MarketReport, type ReportTransaction,
 } from '../api'
 import { money, clock } from '../market/shared'
 import TransactionGraph from '../market/TransactionGraph'
 
-// SLICE 6 — Reports (post-close debrief toolkit, v3 §13). Five reports, almost all pure
-// presentation on data existing callables already return:
-//   1 Leaderboard          — getLeaderboard (per-team financials + the four room figures)
-//   2 Transaction history  — getTransactionGraph (full price ledger + the Slice-4 graph) · INSTRUCTOR-ONLY
-//   3 Per-region gains     — getMarketReport.regions (synergy × ownership)                · INSTRUCTOR-ONLY
+// Reports (post-close debrief toolkit, v3 §13). FOUR reports, all instructor-only presentation on
+// existing callables (the per-student report was removed — bug G — as redundant with the gradebook):
+//   1 Leaderboard          — getLeaderboard (sortable financials + the room figures with % change)
+//   2 Transaction history  — getMarketReport.transactions table (both parties + unit price) + graph
+//   3 Per-region gains     — getMarketReport.regions (synergy × ownership)
 //   4 Per-team             — getMarketReport.teams + .transactions (attributed ledger)
-//   5 Per-student          — getReportData (participation + KC + free-text — the grade)
-// getMarketReport is the ONE new callable (Reports 3 & 4); it is instructor-only by construction.
+// getTransactionGraph feeds only the (post-game) graph; the LIVE projectable graph is on /market.
 
 // ── Formatting ──────────────────────────────────────────────────────────────────
 
-const ROLE_LABELS: Record<string, string> = { trader: 'Trader' }
-const fmtKc = (n: number | null) => n == null ? '—' : `${Math.round(n * 100)}%`
 const signed = (n: number) => `${n >= 0 ? '+' : '−'}${money(Math.abs(n))}`
 const elapsed = (atMs: number | null, openedAt: number | null) =>
   atMs != null && openedAt != null ? clock(Math.max(0, atMs - openedAt)) : '—'
@@ -54,25 +47,6 @@ function Stat({ label, value, hint, testid }: { label: string; value: string; hi
   )
 }
 
-// ── Per-student report (participation + KC are the grade) ─────────────────────────
-
-type StudentSortKey = 'name' | 'group' | 'role' | 'participation' | 'kc'
-
-const STUDENT_COLUMNS: readonly SortableColumn<StudentReportRow, StudentSortKey>[] = [
-  { key: 'name', label: 'Name', sticky: 'left', headerStyle: { minWidth: 140 },
-    render: r => r.display_name, compare: (a, b) => a.display_name.localeCompare(b.display_name) },
-  { key: 'group', label: 'Team #',
-    render: r => r.group_number ?? '—', compare: (a, b) => (a.group_number ?? Infinity) - (b.group_number ?? Infinity) },
-  { key: 'role', label: 'Role',
-    render: r => ROLE_LABELS[r.role] ?? r.role, compare: (a, b) => a.role.localeCompare(b.role) },
-  { key: 'participation', label: 'Participation (grade)', nullsLast: true, isNull: r => r.participation == null,
-    render: r => r.participation == null ? '—' : <span data-testid="report-participation" style={{ fontVariantNumeric: 'tabular-nums' }}>{r.participation}</span>,
-    compare: (a, b) => (a.participation ?? 0) - (b.participation ?? 0) },
-  { key: 'kc', label: 'KC score (grade)', nullsLast: true, isNull: r => r.knowledge_check_score == null,
-    render: r => <span data-testid="report-kc" style={{ fontVariantNumeric: 'tabular-nums' }}>{fmtKc(r.knowledge_check_score)}</span>,
-    compare: (a, b) => (a.knowledge_check_score ?? 0) - (b.knowledge_check_score ?? 0) },
-]
-
 // ── Modal shell ───────────────────────────────────────────────────────────────────
 
 function Modal({ title, onClose, wide, children }: { title: string; onClose: () => void; wide?: boolean; children: React.ReactNode }) {
@@ -89,90 +63,111 @@ function Modal({ title, onClose, wide, children }: { title: string; onClose: () 
   )
 }
 
-// ── Report 1: Leaderboard (getLeaderboard) ────────────────────────────────────────
+// ── Report 1: Leaderboard (getLeaderboard) — sortable columns + % change (bug F) ──────
+type LbSortKey = 'rank' | 'team' | 'cash' | 'license' | 'portfolio' | 'delta'
+type LbRow = { team_number: number; rank: number; cash: number; license_value: number; portfolio_value: number; delta: number }
+
+const LB_COLUMNS: readonly SortableColumn<LbRow, LbSortKey>[] = [
+  { key: 'rank', label: 'Rank', render: r => r.rank, compare: (a, b) => a.rank - b.rank },
+  { key: 'team', label: 'Team', render: r => <span style={{ fontWeight: 600 }}>Team {r.team_number}</span>, compare: (a, b) => a.team_number - b.team_number },
+  { key: 'cash', label: 'Cash', render: r => money(r.cash), compare: (a, b) => a.cash - b.cash },
+  { key: 'license', label: 'License Value', render: r => money(r.license_value), compare: (a, b) => a.license_value - b.license_value },
+  { key: 'portfolio', label: 'Portfolio Value', render: r => <span style={{ fontWeight: 700 }}>{money(r.portfolio_value)}</span>, compare: (a, b) => a.portfolio_value - b.portfolio_value },
+  { key: 'delta', label: 'Δ vs open', render: r => <span style={{ color: r.delta >= 0 ? '#137333' : '#b3261e' }}>{signed(r.delta)}</span>, compare: (a, b) => a.delta - b.delta },
+]
+
 function LeaderboardReport({ board }: { board: Leaderboard }) {
   const eff = board.efficient_market_value
-  // The SAME unified efficiency measure as the live dashboard (Slice 5): gains realized /
-  // gains available = (achieved − initial) / (efficient − initial). NOT a second definition.
-  const captured = eff > board.total_initial_value
-    ? Math.round(((board.value_after_trade - board.total_initial_value) / (eff - board.total_initial_value)) * 100)
-    : 0
-  // Every team opens at the same portfolio (400 license + starting cash); the delta column is
-  // vs that opening baseline. total_initial_value / N = 1400 in the standard config.
-  const baseline = board.teams.length ? board.total_initial_value / board.teams.length : 0
+  const tiv = board.total_initial_value
+  const vat = board.value_after_trade
+  // Efficiency captured = gains realized / gains available (the unified dashboard measure).
+  const captured = eff > tiv ? Math.round(((vat - tiv) / (eff - tiv)) * 100) : 0
+  // % change in total market value from the opening allocation to after trade — the headline %
+  // shown in parens on the Value After Trade tile (bug F).
+  const pctChange = tiv > 0 ? ((vat - tiv) / tiv) * 100 : 0
+  const pctStr = `${pctChange >= 0 ? '+' : '−'}${Math.abs(pctChange).toFixed(1)}%`
+  // Every team opens at the same portfolio; the Δ column is vs that opening baseline (TIV / N).
+  const baseline = board.teams.length ? tiv / board.teams.length : 0
+  const ranked = [...board.teams].sort((a, b) => b.portfolio_value - a.portfolio_value)
+  const rows: LbRow[] = ranked.map((t, i) => ({
+    team_number: t.team_number, rank: i + 1, cash: t.cash, license_value: t.license_value,
+    portfolio_value: t.portfolio_value, delta: t.portfolio_value - baseline,
+  }))
   return (
     <section data-testid="report-leaderboard">
+      {/* Tile order (bug F): Total Initial · Value After Trade (with % change) · Efficient. */}
       <div style={{ display: 'flex', flexWrap: 'wrap', gap: '0.7rem', marginBottom: '1rem' }}>
+        <Stat label="Total Initial Value" value={money(tiv)} hint="portfolios at grouping, before any trade" testid="rep-total-initial-value" />
+        <Stat label="Value After Trade" value={`${money(vat)} (${pctStr})`} hint={`${captured}% of available gains from trade captured`} testid="rep-value-after-trade" />
         <Stat label="Efficient Market Value" value={money(eff)} hint="ceiling if every license landed on its best-fit team" testid="rep-efficient-market-value" />
-        <Stat label="Total Initial Value" value={money(board.total_initial_value)} hint="portfolios at grouping, before any trade" testid="rep-total-initial-value" />
-        <Stat label="Value After Trade" value={money(board.value_after_trade)} hint={`Efficiency captured: ${captured}% of available gains`} testid="rep-value-after-trade" />
       </div>
-      <div style={{ overflowX: 'auto' }}>
-        <table style={{ borderCollapse: 'collapse', fontSize: '0.9rem', width: '100%', maxWidth: 720 }} data-testid="report-leaderboard-table">
-          <thead>
-            <tr>
-              <th style={th}>Rank</th><th style={thL}>Team</th>
-              <th style={th}>Cash</th><th style={th}>License Value</th>
-              <th style={th}>Portfolio Value</th><th style={th}>Δ vs open</th>
-            </tr>
-          </thead>
-          <tbody>
-            {board.teams.map((t, i) => {
-              const delta = t.portfolio_value - baseline
-              return (
-                <tr key={t.team_number} data-testid={`report-lb-row-${t.team_number}`}>
-                  <td style={td}>{i + 1}</td>
-                  <td style={{ ...tdL, fontWeight: 600 }}>Team {t.team_number}</td>
-                  <td style={td}>{money(t.cash)}</td>
-                  <td style={td}>{money(t.license_value)}</td>
-                  <td style={{ ...td, fontWeight: 700 }}>{money(t.portfolio_value)}</td>
-                  <td style={{ ...td, color: delta >= 0 ? '#137333' : '#b3261e' }}>{signed(delta)}</td>
-                </tr>
-              )
-            })}
-          </tbody>
-        </table>
+      <div style={{ overflow: 'auto', maxHeight: '60vh', border: '1px solid #ddd', borderRadius: 6 }} data-testid="report-leaderboard-table">
+        <SortableTable<LbRow, LbSortKey> rows={rows} columns={LB_COLUMNS} getRowKey={r => String(r.team_number)} initialSortKey="rank" />
       </div>
     </section>
   )
 }
 
-// ── Report 2: Transaction history + price graph (getTransactionGraph — INSTRUCTOR ONLY) ─
-function HistoryReport({ graph }: { graph: TxGraph }) {
-  const now = Date.now()
-  const detailOf = (p: TxGraph['points'][number]) =>
-    p.type === 'swap' ? 'swap' : `${p.quantity ?? '—'} × Region ${p.region ?? '—'}`
+// ── Report 2: Transaction history — the attributed price ledger (INSTRUCTOR ONLY) ─────
+// The table is the debrief artifact (C): every settled transaction with BOTH parties (bug D) and
+// the TRUE unit price (lot price ÷ quantity — 2 licenses for $300 reads $150/license, bug D). The
+// live projectable graph lives on the dashboard; the post-game snapshot graph is kept here (fixed
+// to span the full market length). Team identity comes from getMarketReport (getTransactionGraph
+// strips it by construction), which is instructor-only — same as this whole report.
+function HistoryReport({ graph, report }: { graph: TxGraph; report: MarketReport }) {
+  const txs = [...report.transactions].sort((a, b) => (a.at_ms ?? 0) - (b.at_ms ?? 0))
+  // Per-row parties, detail, and TRUE unit price (price is the lot total; unit = lot ÷ quantity).
+  const rowOf = (t: ReportTransaction) => {
+    if (t.type === 'swap') {
+      const x = `${t.quantity_x ?? '—'}×${t.region_x ?? '—'}`, y = `${t.quantity_y ?? '—'}×${t.region_y ?? '—'}`
+      return { seller: t.from_team != null ? `Team ${t.from_team}` : '—', buyer: t.to_team != null ? `Team ${t.to_team}` : '—',
+        detail: `${x} ↔ ${y}`, qty: null as number | null, price: null as number | null, unit: null as number | null }
+    }
+    const qty = t.quantity ?? null, price = t.price ?? null
+    return {
+      seller: t.from_team != null ? `Team ${t.from_team}` : '—',
+      buyer: t.to_team != null ? `Team ${t.to_team}` : '—',
+      detail: `${qty ?? '—'} × Region ${t.region ?? '—'}`,
+      qty, price, unit: price != null && qty ? price / qty : null,
+    }
+  }
   return (
     <section data-testid="report-history">
       <p style={noteStyle}>
-        The full price ledger — every settled deal, auction, and swap, with prices, quantities, and elapsed-time
-        stamps. This report is <strong>instructor-only</strong>: there is no student path to the cross-team price stream.
+        The full price ledger — every settled deal, auction, and swap, with both parties, quantities, and the
+        <strong> per-license price</strong> (a lot of 2 for $300 reads $150/license). This report is
+        <strong> instructor-only</strong>: there is no student path to the cross-team price stream.
       </p>
-      {/* The graph is secondary to the ledger here — cap its footprint so the table below always
-          gets a visible, scrollable region (the graph scales down; on the /market view it's full size). */}
-      <div style={{ border: '1px solid #e2e8f0', borderRadius: 8, padding: '0.5rem', marginBottom: '1rem', maxWidth: 560, margin: '0 auto 1rem' }}>
-        <TransactionGraph points={graph.points} openedAt={graph.opened_at} nowMs={now} />
+      {/* Post-game snapshot of the graph (the LIVE, projectable one is on the dashboard). Capped so
+          the table below always gets a visible, scrollable region. */}
+      <div style={{ border: '1px solid #e2e8f0', borderRadius: 8, padding: '0.5rem', maxWidth: 560, margin: '0 auto 1rem' }}>
+        <TransactionGraph points={graph.points} openedAt={graph.opened_at} closesAt={graph.closes_at} />
       </div>
       <div style={{ overflow: 'auto', maxHeight: '42vh', minHeight: 180, border: '1px solid #ddd', borderRadius: 6 }}>
         <table style={{ borderCollapse: 'collapse', fontSize: '0.85rem', width: '100%' }} data-testid="report-history-table">
           <thead>
             <tr>
-              <th style={thL}>Time</th><th style={thL}>Type</th><th style={thL}>Detail</th>
-              <th style={th}>Quantity</th><th style={th}>Price</th><th style={th}>Price / license</th>
+              <th style={thL}>Time</th><th style={thL}>Type</th><th style={thL}>Seller</th><th style={thL}>Buyer</th>
+              <th style={thL}>Detail</th><th style={th}>Quantity</th><th style={th}>Price (lot)</th><th style={th}>Price / license</th>
             </tr>
           </thead>
           <tbody>
-            {graph.points.map((p, i) => (
-              <tr key={i} data-testid={`report-history-row-${i}`}>
-                <td style={tdL}>{elapsed(p.at_ms, graph.opened_at)}</td>
-                <td style={{ ...tdL, textTransform: 'capitalize' }}>{p.type}</td>
-                <td style={tdL}>{detailOf(p)}</td>
-                <td style={td}>{p.quantity ?? '—'}</td>
-                <td style={td}>{p.price != null ? money(p.price) : '—'}</td>
-                <td style={td}>{p.price_per_license != null ? money(p.price_per_license) : '—'}</td>
-              </tr>
-            ))}
-            {graph.points.length === 0 && <tr><td style={tdL} colSpan={6}>No transactions recorded.</td></tr>}
+            {txs.map((t, i) => {
+              const r = rowOf(t)
+              return (
+                <tr key={t.transaction_id} data-testid={`report-history-row-${i}`}>
+                  <td style={tdL}>{elapsed(t.at_ms, report.opened_at)}</td>
+                  <td style={{ ...tdL, textTransform: 'capitalize' }}>{t.type}</td>
+                  <td style={tdL}>{r.seller}</td>
+                  <td style={tdL}>{r.buyer}</td>
+                  <td style={tdL}>{r.detail}</td>
+                  <td style={td}>{r.qty ?? '—'}</td>
+                  <td style={td}>{r.price != null ? money(r.price) : '—'}</td>
+                  <td style={td}>{r.unit != null ? money(r.unit) : '—'}</td>
+                </tr>
+              )
+            })}
+            {txs.length === 0 && <tr><td style={tdL} colSpan={8}>No transactions recorded.</td></tr>}
           </tbody>
         </table>
       </div>
@@ -338,7 +333,7 @@ function PerTeamReport({ report }: { report: MarketReport }) {
 
 // ── Page ────────────────────────────────────────────────────────────────────────
 
-type ReportKind = 'student' | 'leaderboard' | 'history' | 'regions' | 'team'
+type ReportKind = 'leaderboard' | 'history' | 'regions' | 'team'
 
 export default function Reports() {
   const navigate = useNavigate()
@@ -389,7 +384,6 @@ export default function Reports() {
   }, [devGameInstanceId, tokenParam]) // eslint-disable-line react-hooks/exhaustive-deps
 
   // ── Data ─────────────────────────────────────────────────────────────────────
-  const [data, setData] = useState<ReportData | null>(null)
   const [board, setBoard] = useState<Leaderboard | null>(null)
   const [graph, setGraph] = useState<TxGraph | null>(null)
   const [market, setMarket] = useState<MarketReport | null>(null)
@@ -399,9 +393,8 @@ export default function Reports() {
   useEffect(() => {
     if (!sessionReady) return
     setLoading(true); setError(null)
-    const studentFn = httpsCallable<object, ReportData>(functions, 'getReportData')
+    // No getReportData — the per-student report was removed (redundant with the gradebook, bug G).
     void Promise.allSettled([
-      studentFn({}).then(r => setData(r.data)),
       getLeaderboard().then(setBoard),
       getTransactionGraph().then(setGraph),
       getMarketReport().then(setMarket),
@@ -413,10 +406,6 @@ export default function Reports() {
   }, [sessionReady])
 
   const [active, setActive] = useState<ReportKind | null>(null)
-  const [activeExport, setActiveExport] = useState<{ title: string; text: string } | null>(null)
-
-  const rows = data?.rows ?? []
-  const questions = data?.questions ?? []
 
   const tiles: ReportTileConfig[] = [
     {
@@ -431,7 +420,7 @@ export default function Reports() {
       preview: graph
         ? <span style={{ fontSize: '0.9rem', color: '#555' }}>{graph.points.length} transaction{graph.points.length !== 1 ? 's' : ''}</span>
         : <span style={{ color: '#94a3b8', fontSize: '0.85rem' }}>Loading…</span>,
-      onOpen: () => setActive('history'), disabled: !graph, actionLabel: 'Open ↗',
+      onOpen: () => setActive('history'), disabled: !graph || !market, actionLabel: 'Open ↗',
     },
     {
       id: 'regions', title: 'Per-region gains from trade (instructor-only)',
@@ -447,25 +436,7 @@ export default function Reports() {
         : <span style={{ color: '#94a3b8', fontSize: '0.85rem' }}>Loading…</span>,
       onOpen: () => setActive('team'), disabled: !market, actionLabel: 'Open ↗',
     },
-    {
-      id: 'per-student', title: 'Per-student report (participation + KC)',
-      preview: <span style={{ fontSize: '0.9rem', color: '#555' }}>{rows.length} student{rows.length !== 1 ? 's' : ''} finalized</span>,
-      onOpen: () => setActive('student'), disabled: rows.length === 0, actionLabel: 'Open ↗',
-    },
-    ...questions.map(q => {
-      const roleLabel = ROLE_LABELS[q.role_target] ?? q.role_target
-      const tileTitle = `${roleLabel}: ${q.prompt}`
-      const qRows: AiTextRow[] = rows.filter(r => r.role === q.role_target && r.text_answers[q.field])
-        .map(r => ({ name: r.display_name, raw_score: r.participation, answer: r.text_answers[q.field] }))
-      const text = buildStudentTextExport(tileTitle, qRows)
-      return {
-        id: q.field, title: tileTitle,
-        preview: qRows.length === 0
-          ? <span style={{ color: '#94a3b8', fontSize: '0.85rem' }}>No responses yet.</span>
-          : <span style={{ fontSize: '1.25rem', fontWeight: 700, color: '#111' }}>{qRows.length} response{qRows.length !== 1 ? 's' : ''}</span>,
-        onOpen: () => setActiveExport({ title: tileTitle, text }), disabled: rows.length === 0, actionLabel: 'Open ↗',
-      } satisfies ReportTileConfig
-    }),
+    // Per-student report removed (bug G) — participation + KC live in the classroom gradebook.
   ]
 
   if (authError) {
@@ -482,7 +453,7 @@ export default function Reports() {
 
       <main style={{ flex: 1, padding: '1rem 1.5rem' }}>
         {error && <p style={{ color: '#c00', marginBottom: '1rem' }}>{error}</p>}
-        {loading && !data && <p style={{ color: '#888' }}>Loading…</p>}
+        {loading && !board && <p style={{ color: '#888' }}>Loading…</p>}
         <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(280px, 1fr))', gap: '1rem' }} data-testid="report-tiles">
           {tiles.map(t => (
             <div key={t.id} style={{ border: '1px solid #d0d7de', borderRadius: 8, padding: '1rem', background: '#fff', display: 'flex', flexDirection: 'column', gap: '0.6rem', opacity: t.disabled ? 0.55 : 1 }} data-testid={`report-tile-${t.id}`}>
@@ -500,8 +471,8 @@ export default function Reports() {
       {active === 'leaderboard' && board && (
         <Modal title="Leaderboard — final standings" wide onClose={() => setActive(null)}><LeaderboardReport board={board} /></Modal>
       )}
-      {active === 'history' && graph && (
-        <Modal title="Transaction history (instructor-only)" wide onClose={() => setActive(null)}><HistoryReport graph={graph} /></Modal>
+      {active === 'history' && graph && market && (
+        <Modal title="Transaction history (instructor-only)" wide onClose={() => setActive(null)}><HistoryReport graph={graph} report={market} /></Modal>
       )}
       {active === 'regions' && market && (
         <Modal title="Per-region gains from trade (instructor-only)" wide onClose={() => setActive(null)}><RegionGainsReport report={market} /></Modal>
@@ -509,23 +480,6 @@ export default function Reports() {
       {active === 'team' && market && (
         <Modal title="Per-team report" wide onClose={() => setActive(null)}><PerTeamReport report={market} /></Modal>
       )}
-      {active === 'student' && (
-        <Modal title="Per-student report" wide onClose={() => setActive(null)}>
-          <p style={{ fontSize: '0.85rem', color: '#444', margin: '0 0 0.75rem' }}>
-            The grade is <strong>Participation</strong> (present = 1) + <strong>KC score</strong>.
-            A team&apos;s portfolio value never enters the grade.
-          </p>
-          <div style={{ overflow: 'auto', maxHeight: 'calc(100vh - 16rem)', border: '1px solid #ddd', borderRadius: 6 }}>
-            <SortableTable<StudentReportRow, StudentSortKey>
-              rows={rows} columns={STUDENT_COLUMNS}
-              getRowKey={r => r.participant_id} initialSortKey="group"
-              roleLabels={ROLE_LABELS} getRowRole={r => r.role}
-              emptyMessage="No finalized participants yet." wrapHeaders />
-          </div>
-        </Modal>
-      )}
-
-      {activeExport && <ExportModal title={activeExport.title} text={activeExport.text} onClose={() => setActiveExport(null)} />}
     </div>
   )
 }

@@ -116,6 +116,9 @@ export function makeGetTransactionGraph(def: GameDefinition) {
     return {
       ok: true as const,
       opened_at: toMillis(stateSnap.data()?.['opened_at']),
+      // closes_at lets the graph's X-axis span the FULL market length (not wall-clock "now"),
+      // so dots spread across the real 0–duration window instead of being crushed to the left.
+      closes_at: toMillis(stateSnap.data()?.['closes_at']),
       points,
     }
   })

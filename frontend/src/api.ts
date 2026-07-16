@@ -162,6 +162,7 @@ export type GraphPoint = {
 export type TransactionGraph = {
   ok: boolean
   opened_at: number | null
+  closes_at: number | null           // market close → the X-axis max (full market length)
   points: GraphPoint[]
 }
 export const getTransactionGraph = () => callFn<TransactionGraph>('getTransactionGraph', {})
