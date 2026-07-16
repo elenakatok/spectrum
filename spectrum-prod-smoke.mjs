@@ -298,7 +298,13 @@ async function restore(pids) {
   const del = admin.firestore.FieldValue.delete()
   const batch = db.batch()
   for (const pid of pids) batch.set(inst.collection('participants').doc(pid),
-    Object.fromEntries(SEEDED_FIELDS.map((f) => [f, del])), { merge: true })
+    Object.fromEntries([...SEEDED_FIELDS, 'knowledge_check_completed_at', 'knowledge_check_score']
+      .map((f) => [f, del])), { merge: true })
+  // Clear the INSTANCE-level finalize flags too — scoreAndRecord (real dry-run OR seedFinalized)
+  // sets {finalized:true, finalized_at} on the instance doc; leaving them makes the shared dashboard
+  // render the "session complete" view and HIDES the grouping panel, so the next run can't re-group.
+  // (Restoring to bare must reset these, else the smoke can never re-run on a finalized instance.)
+  batch.set(inst, { finalized: del, finalized_at: del }, { merge: true })
   await batch.commit()
   await rtdb.ref(`presence/${GID}`).remove()
 }
@@ -322,6 +328,13 @@ async function main() {
   console.log(`\n=== Spectrum PROD smoke → ${BASE} (instance ${GID}) ===\n`)
   const pids = (await inst.collection('participants').get()).docs.map((d) => d.id)
   ok(pids.length === N_TEAMS, `test instance has ${pids.length} participants`)
+
+  // PRE-CLEAN: reset a dirty/finalized instance to bare BEFORE seeding. A prior human dry run (or a
+  // crashed run) can leave the instance grouped/finalized with leftover groups/tx/state; without this
+  // the browser grouping can't proceed (finalized → grouping panel hidden). restore() now clears the
+  // instance finalize flags too, so this makes the smoke self-heal from any leftover state.
+  log('pre-clean: resetting the instance to bare before seeding…')
+  await restore(pids)
 
   log('seeding 14 participants to groupable (role/attendance/presence)…')
   await seedGroupable(pids)
