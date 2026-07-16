@@ -415,6 +415,15 @@ async function main() {
     const ms = (await inst.collection('market').doc('state').get()).data()
     ok(ms?.status === 'open' && ms?.num_teams === N_TEAMS, `grouped + market OPEN (${ms?.num_teams} teams, ${ms?.num_regions} regions, efficient value ${ms?.efficient_market_value})`)
     if (ms?.status !== 'open') throw new Error('market did not open — aborting before the student walk (instance will be restored)')
+    // BUG 2 (live 2026-07): the deployed startMarket must compute closes_at from a real duration —
+    // closes_at = opened_at + market_duration_minutes — not a hardcoded/absent window. Read-only
+    // check BEFORE spreadTimeline backdates opened_at. (The discriminating "honors the instructor's
+    // SAVED duration, not the stale grouping snapshot" proof is the emulator shakeout, which writes
+    // config AFTER grouping and asserts a 10-min window; here we confirm the deployed window is
+    // duration-consistent and sane.)
+    const winMin = (ms.closes_at.toMillis() - ms.opened_at.toMillis()) / 60000
+    ok(Number.isFinite(winMin) && winMin > 0 && Math.abs(winMin - ms.market_duration_minutes) < 0.5,
+      `BUG 2: deployed startMarket window is duration-consistent — ${winMin.toFixed(1)}min = market_duration_minutes ${ms.market_duration_minutes}`)
 
     // ── Read the grouped world (ADC) to pick a student + deal params ──
     const groups = await inst.collection('groups').get()
@@ -449,6 +458,17 @@ async function main() {
 
     // One real deal so the History tab has content (real executeDeal in prod).
     await stu.locator('[data-testid="tab-transactions"]').click()
+    // BUG 1 (live 2026-07): the seller's client used to warn "Price exceeds your available cash"
+    // when the DEAL price exceeded the SELLER's own cash — but in a license-for-cash deal the BUYER
+    // pays, and the seller cannot see the buyer's private cash (§7.1), so the client must NOT judge
+    // affordability at all (the server validates the buyer). Fill a price far above any seller cash
+    // and assert that scary warning is GONE (old code rendered it here; new code never does). We do
+    // NOT submit at this price — reset to 250 below so the real deal succeeds.
+    await stu.locator(`[data-testid="deal-price-${dealRegion}"]`).fill('999999')
+    await sleep(400)
+    const sawSellerCashWarn = await stu.locator('[data-testid="transactions-tab"]')
+      .getByText(/Price exceeds your available cash/i).count()
+    ok(sawSellerCashWarn === 0, 'BUG 1: no seller-side "Price exceeds your available cash" warning even at a price above seller cash (client no longer judges buyer affordability)')
     await stu.locator(`[data-testid="deal-price-${dealRegion}"]`).fill('250')
     await stu.locator(`[data-testid="deal-buyer-${dealRegion}"]`).fill(String(buyerTeam))
     await stu.locator(`[data-testid="deal-pw-${dealRegion}"]`).fill(String(pwOf.get(buyerTeam) ?? ''))

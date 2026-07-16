@@ -174,8 +174,15 @@ async function seedAndGroup() {
   for (const pid of PIDS) await fsPatch(`participants/${pid}`, 'display_name', { stringValue: nameOf(pid) })
   const g = await callFn('groupParticipants', asDev({ num_teams: N_TEAMS }))
   assert(g.ok && g.result?.teams_created === N_TEAMS, `groupParticipants formed ${N_TEAMS} teams (efficient value ${g.result?.efficient_market_value})`)
+  // BUG 2 (live 2026-07): startMarket must honor the instructor's saved market_duration_minutes,
+  // read from config/main at OPEN time — not a stale grouping-time snapshot or a hardcoded 90.
+  // The instructor sets duration AFTER grouping, so we write config here (post-group) and prove
+  // the opened window matches. Before the fix this came back 90 regardless.
+  await fsPatch('config/main', 'market_duration_minutes', { integerValue: 10 })
   const s = await callFn('startMarket', asDev({}))
   assert(s.ok, 'startMarket opened the market')
+  const windowMin = (s.result.closes_at - s.result.opened_at) / 60_000
+  assert(Math.abs(windowMin - 10) < 0.5, `BUG 2: startMarket honored saved duration — window ${windowMin.toFixed(2)}min ≈ 10 (config/main), not the 90 default`)
   // Long market window (bumped down in wave 5) + short auctions so they close within the run.
   await fsPatch('market/state', 'closes_at', { timestampValue: new Date(Date.now() + 3_600_000).toISOString() })
   await fsPatch('market/state', 'auction_duration_minutes', { doubleValue: 0.2 }) // 12s
@@ -246,7 +253,14 @@ async function main() {
     // The Cloud-Task handler + resolve-on-read backstop settle ASYNCHRONOUSLY — poll until every
     // auction is resolved (settled / no_sale), up to ~9s, before asserting (mirrors the S5 poll).
     const resolvedOf = async (id) => { const st = strVal((await fsGet(`auctions/${id}`))?.fields?.status); return st === 'settled' || st === 'no_sale' }
-    for (let i = 0; i < 30; i++) { const states = await Promise.all(auctions.map((a) => resolvedOf(a.id))); if (states.every(Boolean)) break; await sleep(300) }
+    // Poll up to ~18s: the Cloud-Task handler + resolve-on-read backstop settle asynchronously and,
+    // under emulator load, occasionally exceed the old 9s window (the auctions DO resolve — the
+    // pre-reconciliation "0 still open" check and exact reconciliation confirm it — just later). A
+    // genuinely stuck auction still fails well within 18s; this only removes a load-timing flake.
+    let polls = 0
+    for (let i = 0; i < 60; i++) { polls = i + 1; const states = await Promise.all(auctions.map((a) => resolvedOf(a.id))); if (states.every(Boolean)) break; await sleep(300) }
+    const finalStates = await Promise.all(auctions.map(async (a) => strVal((await fsGet(`auctions/${a.id}`))?.fields?.status)))
+    log(`WAVE3 poll: ${polls} iters (~${(polls * 0.3).toFixed(1)}s) · statuses ${JSON.stringify(finalStates)}`)
     // Every auction must be resolved exactly once (settled or no_sale), each with ≤1 auction event.
     let allResolved = true, oneEventEach = true
     for (const a of auctions) {

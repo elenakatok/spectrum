@@ -255,6 +255,14 @@ export function makeStartMarket(def: GameDefinition) {
       const instanceRef = db.collection('game_instances').doc(gameInstanceId)
       const stateRef = instanceRef.collection('market').doc('state')
 
+      // Read the market duration from the SAVED config at Start-Market time — NOT the value stamped
+      // into the state doc at grouping. The instructor typically sets/edits the duration in Settings
+      // AFTER grouping (group room → students read dossiers → tweak settings → Start Market), so the
+      // grouping-time snapshot is stale; reading config here honors whatever was last saved. Default
+      // 90 when unset (readInstanceConfig's num() fallback). config/main isn't mutated by this tx, so
+      // reading it before the transaction is safe.
+      const cfg = await readInstanceConfig(instanceRef)
+
       return await db.runTransaction(async (tx) => {
         const snap = await tx.get(stateRef)
         if (!snap.exists) {
@@ -275,11 +283,12 @@ export function makeStartMarket(def: GameDefinition) {
           throw new HttpsError('failed-precondition', `Market cannot be started from status '${status}'.`)
         }
 
-        const durationMin = (state['market_duration_minutes'] as number) ?? DEFAULT_MARKET_DURATION_MINUTES
+        const durationMin = cfg.marketDurationMinutes
         const now = Timestamp.now()
         const closes = Timestamp.fromMillis(now.toMillis() + durationMin * 60_000)
 
-        tx.update(stateRef, { status: 'open', opened_at: now, closes_at: closes })
+        // Persist the duration actually used, so the state doc reflects reality (not the stale stamp).
+        tx.update(stateRef, { status: 'open', opened_at: now, closes_at: closes, market_duration_minutes: durationMin })
         return {
           ok: true as const,
           alreadyStarted: false,

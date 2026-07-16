@@ -46,7 +46,7 @@ export default function TransactionsTab({
       <Section title="Report a License-for-Cash Transaction"
         hint="You negotiate the price verbally; record it here, then the buyer types their own password to authorize.">
         {myHoldings.map((h) => (
-          <DealRow key={h.region} h={h} available={available} onActed={onActed} />
+          <DealRow key={h.region} h={h} onActed={onActed} />
         ))}
       </Section>
 
@@ -68,7 +68,11 @@ export default function TransactionsTab({
 }
 
 // ── one deal row: region fixed; quantity / price / buyer team / buyer password ──
-function DealRow({ h, available, onActed }: { h: Holding; available: number; onActed: () => void }) {
+// NO client-side cash check: in a license-for-cash deal the BUYER pays, and the seller's client
+// cannot see the buyer's private cash (§7.1). The server (executeDeal) validates the BUYER's
+// available cash and returns the honest non-leaking error if short. (The old warning checked the
+// SELLER's own cash — irrelevant to a sale — and was removed.)
+function DealRow({ h, onActed }: { h: Holding; onActed: () => void }) {
   const [qty, setQty] = useState('1')
   const [price, setPrice] = useState('')
   const [buyer, setBuyer] = useState('')
@@ -93,7 +97,6 @@ function DealRow({ h, available, onActed }: { h: Holding; available: number; onA
       <PwIn label="Buyer's password" value={pw} onChange={setPw} testid={`deal-pw-${h.region}`} />
       <SubmitBtn onClick={submit} disabled={busy || !price || !buyer || !pw} testid={`deal-submit-${h.region}`}>Record deal</SubmitBtn>
       <Status msg={msg} err={err} />
-      {Number(price) > available && <Warn>Price exceeds your available cash — you may still record it; the buyer pays, not you.</Warn>}
     </Row>
   )
 }
@@ -211,9 +214,5 @@ const Status = ({ msg, err }: { msg: string | null; err: string | null }) =>
   err ? <span style={{ color: '#c00', fontSize: '0.82rem', flexBasis: '100%' }}>{err}</span>
     : msg ? <span style={{ color: '#137333', fontSize: '0.82rem', flexBasis: '100%' }}>{msg}</span>
     : null
-const Warn = ({ children }: { children: ReactNode }) => (
-  <span style={{ color: '#8a6d00', fontSize: '0.8rem', flexBasis: '100%' }}>{children}</span>
-)
-
 const lbl: CSSProperties = { display: 'flex', flexDirection: 'column', gap: '0.2rem', fontSize: '0.78rem', color: '#555' }
 const inp: CSSProperties = { padding: '0.35rem 0.4rem', width: 110, border: '1px solid #ccc', borderRadius: 4 }
