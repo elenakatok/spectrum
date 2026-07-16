@@ -1,4 +1,4 @@
-import { type CSSProperties, useEffect, useState } from 'react'
+import { type CSSProperties, type ReactNode, useEffect, useLayoutEffect, useRef, useState } from 'react'
 import { useSearchParams } from 'react-router-dom'
 import { collection, doc, onSnapshot } from 'firebase/firestore'
 import { db } from '../firebase'
@@ -75,9 +75,9 @@ function ProjectionSurface({ gameInstanceId, view }: { gameInstanceId: string; v
         </h1>
         <span data-testid="projection-clock" style={{ fontSize: '1.4rem', fontWeight: 700, color: open ? '#66ff9c' : '#cfcfcf' }}>{clockText}</span>
       </header>
-      <div style={panel}>
+      <div style={view === 'ownership' ? boardPanel : panel}>
         {view === 'ownership'
-          ? <div style={{ zoom: 2.3 } as CSSProperties}><OwnershipBoard licenses={licenses} title="Ownership" /></div>
+          ? <FillToWindow><OwnershipBoard licenses={licenses} title="Ownership" /></FillToWindow>
           : graph
             ? <TransactionGraph points={graph.points} openedAt={graph.opened_at} closesAt={graph.closes_at} />
             : <p style={{ color: '#888', fontSize: '1.3rem' }}>Loading…</p>}
@@ -86,5 +86,40 @@ function ProjectionSurface({ gameInstanceId, view }: { gameInstanceId: string; v
   )
 }
 
+// ── FillToWindow — scale the board up to FILL the projection window (item 3). The board is a
+// fixed-size table; here we measure its natural size and the panel, then transform-scale it as
+// large as fits (centered), so the projection is dominated by the board, not white space —
+// legible from the back of a room. offsetWidth/Height ignore the transform, so there is no
+// measure↔scale feedback loop; a ResizeObserver re-fits on window resize or board growth. ─────
+function FillToWindow({ children }: { children: ReactNode }) {
+  const outerRef = useRef<HTMLDivElement>(null)
+  const innerRef = useRef<HTMLDivElement>(null)
+  const [scale, setScale] = useState(1)
+  useLayoutEffect(() => {
+    const outer = outerRef.current, inner = innerRef.current
+    if (!outer || !inner) return
+    const fit = () => {
+      const nw = inner.offsetWidth, nh = inner.offsetHeight
+      if (!nw || !nh) return
+      const k = Math.min(outer.clientWidth / nw, outer.clientHeight / nh)
+      if (Number.isFinite(k) && k > 0) setScale(k * 0.97) // small margin off the edges
+    }
+    fit()
+    const ro = new ResizeObserver(fit)
+    ro.observe(outer); ro.observe(inner)
+    return () => ro.disconnect()
+  }, [])
+  return (
+    <div ref={outerRef} data-testid="projection-fill" style={{ position: 'absolute', inset: 0, overflow: 'hidden' }}>
+      <div ref={innerRef} style={{ position: 'absolute', top: '50%', left: '50%', transform: `translate(-50%, -50%) scale(${scale})`, transformOrigin: 'center center' }}>
+        {children}
+      </div>
+    </div>
+  )
+}
+
 const frame: CSSProperties = { minHeight: '100vh', background: '#111', display: 'flex', flexDirection: 'column', fontFamily: 'system-ui, sans-serif' }
 const panel: CSSProperties = { flex: 1, background: '#fff', margin: '0 1rem 1rem', borderRadius: 8, padding: '1.5rem', overflow: 'auto' }
+// The ownership board fills its panel (FillToWindow is absolutely positioned) — no inner padding
+// so the scaled board can use the whole surface; position relative anchors the absolute fill.
+const boardPanel: CSSProperties = { flex: 1, background: '#fff', margin: '0 1rem 1rem', borderRadius: 8, position: 'relative', overflow: 'hidden' }

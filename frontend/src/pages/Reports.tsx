@@ -15,6 +15,7 @@ import {
 } from '../api'
 import { money, clock } from '../market/shared'
 import TransactionGraph from '../market/TransactionGraph'
+import RegionGainsTable from '../market/RegionGainsTable'
 
 // Reports (post-close debrief toolkit, v3 §13). FOUR reports, all instructor-only presentation on
 // existing callables (the per-student report was removed — bug G — as redundant with the gradebook):
@@ -176,9 +177,8 @@ function HistoryReport({ graph, report }: { graph: TxGraph; report: MarketReport
 }
 
 // ── Report 3: Per-region gains-from-trade (getMarketReport.regions — INSTRUCTOR ONLY) ──
+// Same table as the LIVE dashboard view (market/RegionGainsTable) — shared so the two never drift.
 function RegionGainsReport({ report }: { report: MarketReport }) {
-  // Sorted by gap descending — the regions FURTHEST from efficient concentration surface first.
-  const rows = [...report.regions].sort((a, b) => b.gap - a.gap)
   return (
     <section data-testid="report-regions">
       <p style={noteStyle}>
@@ -188,27 +188,7 @@ function RegionGainsReport({ report }: { report: MarketReport }) {
         <em> gap</em> is the gains-from-trade still on the table. The named teams are simply the two with the
         strongest synergy here — <strong>not</strong> winners, and usually neither ended up holding the block.
       </p>
-      <div style={{ overflowX: 'auto' }}>
-        <table style={{ borderCollapse: 'collapse', fontSize: '0.9rem', width: '100%', maxWidth: 760 }} data-testid="report-regions-table">
-          <thead>
-            <tr>
-              <th style={thL}>Region</th><th style={th}>Efficient value</th><th style={th}>Realized value</th>
-              <th style={th}>Gap</th><th style={thL}>Strongest synergy here</th>
-            </tr>
-          </thead>
-          <tbody>
-            {rows.map((r) => (
-              <tr key={r.region} data-testid={`report-region-row-${r.region}`}>
-                <td style={{ ...tdL, fontWeight: 600 }}>Region {r.region}</td>
-                <td style={td}>{money(r.efficient_value)}</td>
-                <td style={td}>{money(r.realized_value)}</td>
-                <td style={{ ...td, fontWeight: 700, color: r.gap > 0 ? '#b3261e' : '#137333' }}>{money(r.gap)}</td>
-                <td style={tdL}>{r.top_synergy_teams.map(n => `Team ${n}`).join(' · ')}</td>
-              </tr>
-            ))}
-          </tbody>
-        </table>
-      </div>
+      <RegionGainsTable regions={report.regions} tableTestid="report-regions-table" rowTestid={(r) => `report-region-row-${r}`} />
     </section>
   )
 }

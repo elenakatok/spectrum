@@ -532,6 +532,28 @@ async function main() {
     const dealTx = txs.find((t) => t.type === 'deal' && t.price === DEAL_PRICE)
     const attributed = !!dealTx && dealTx.from_team === DEAL_SELLER && dealTx.to_team === DEAL_BUYER && typeof dealTx.acted_by_name === 'string' && dealTx.acted_by_name.length > 0
     assert(attributed, `LEG 7 — getMarketReport attributes the deal (Team ${DEAL_SELLER}→${DEAL_BUYER}, by "${dealTx?.acted_by_name}") — the Report 4 team identity getTransactionGraph omits`)
+
+    // ── LEG 7c (item 6) — the LIVE per-region gains dashboard view. Same getMarketReport, now
+    // surfaced on the OPEN market (not just post-game). A student must not reach it via API, DOM,
+    // or RTDB. This walk runs against an OPEN market, so the reads above ARE the live case; assert
+    // that explicitly (status open + student rejected while open), plus the DOM/RTDB boundary. ──
+    const liveState = await callFn('getMarketState', asDev({}))
+    const marketOpen = liveState.result?.status === 'open'
+    const mStuLive = await callFn('getMarketReport', asStudent(pidForTeam(world, BYS1), {}))
+    assert(marketOpen && rejected(mStuLive) && !/efficient_value|realized_value|synergy/i.test(JSON.stringify(mStuLive.result ?? {})),
+      `LEG 7 — LIVE per-region gains: getMarketReport rejects a student on an OPEN market (status ${mStuLive.status}), no synergy leak`)
+    // (DOM) the live regions view lives ONLY on the instructor-gated /market route; NO student page
+    // imports getMarketReport / the shared RegionGainsTable / the live-regions-table testid.
+    const instSrc = readFileSync(path.join(ROOT, 'frontend/src/pages/InstructorMarket.tsx'), 'utf8')
+    const liveViewHere = /live-regions-table/.test(instSrc) && /getMarketReport/.test(instSrc)
+    const studentPages = ['frontend/src/pages/Play.tsx', 'frontend/src/components/MarketRoom.tsx',
+      'frontend/src/market/GeneralTab.tsx', 'frontend/src/market/HistoryTab.tsx',
+      'frontend/src/market/TeamsTab.tsx', 'frontend/src/market/TransactionsTab.tsx']
+    const noStudentDom = studentPages.every((p) => !/getMarketReport|RegionGainsTable|live-regions-table/.test(readFileSync(path.join(ROOT, p), 'utf8')))
+    assert(liveViewHere && noStudentDom, 'LEG 7 — the LIVE per-region gains view is instructor-only (on /market; no student page imports getMarketReport / RegionGainsTable)')
+    // (RTDB) the world-readable RTDB carries no per-region gains/synergy valuations at all.
+    const rtdbDump = await (await fetch(`${RTDB}/.json?ns=${DB_NS}`, { headers: { Authorization: 'Bearer owner' } })).text()
+    assert(!/efficient_value|realized_value/.test(rtdbDump), 'LEG 7 — no per-region gains/synergy valuations in the RTDB feed (no student RTDB path)')
   }
 
   banner(`RESULT — ${PASS} passed, ${FAIL} failed`)

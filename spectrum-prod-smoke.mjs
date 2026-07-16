@@ -517,7 +517,20 @@ async function main() {
     }
     const perfText = await instr.locator('[data-testid="instructor-market"]').innerText().catch(() => '')
     ok(/24[,.]?850/.test(perfText), `instructor Team Performance shows Efficient Market Value 24,850 (${ms?.efficient_market_value})`)
-    for (const view of ['performance', 'ownership', 'graph', 'teams', 'quiz']) {
+
+    // Item 1 — Quiz Results tab is GONE (KC lives in the classroom gradebook).
+    ok((await instr.locator('[data-testid="nav-quiz"]').count()) === 0, 'item 1: Quiz Results tab removed (no nav-quiz)')
+    // Item 4 — a Back-to-Dashboard link that carries the launch params.
+    const backHref = await instr.locator('[data-testid="back-to-dashboard"]').getAttribute('href').catch(() => null)
+    ok(backHref != null && backHref.includes('/dashboard'), `item 4: Back-to-Dashboard link present (→ ${backHref})`)
+    // Item 5 — summary tiles ordered Total Initial · Value After Trade · Efficient (left→right),
+    // matching the Leaderboard report. Assert on the rendered x-positions.
+    const xOf = async (id) => (await instr.locator(`[data-testid="${id}"]`).boundingBox().catch(() => null))?.x ?? null
+    const [xInit, xVat, xEff] = [await xOf('total-initial-value'), await xOf('value-after-trade'), await xOf('efficient-market-value')]
+    ok(xInit != null && xVat != null && xEff != null && xInit < xVat && xVat < xEff,
+      `item 5: tiles ordered Total Initial < Value After Trade < Efficient (x ${xInit}<${xVat}<${xEff})`)
+
+    for (const view of ['performance', 'ownership', 'graph', 'regions', 'teams']) {
       await instr.locator(`[data-testid="nav-${view}"]`).click().catch(() => {})
       await sleep(2500)
       if (view === 'graph') {
@@ -531,14 +544,26 @@ async function main() {
           await sleep(750)
         }
         ok(deals >= 1 && aucs >= 1 && swaps >= 1, `transaction graph POPULATED (${deals} deals, ${aucs} auctions, ${swaps} swaps)`)
+        ok((await instr.locator('[data-testid="project-graph"]').count()) === 1, 'graph view has a Project button (projection feature)')
+        // Item 2 — the LIVE running trades table alongside the graph, with the true unit price.
+        await instr.locator('[data-testid="live-transactions-table"]').waitFor({ timeout: 15_000 }).catch(() => {})
+        const rows = await instr.locator('[data-testid^="live-tx-row-"]').count()
+        const liveText = await instr.locator('[data-testid="live-transactions-table"]').innerText().catch(() => '')
+        ok(rows >= 1 && /Buyer/.test(liveText) && /Seller/.test(liveText), `item 2: live transactions table renders trades (${rows} rows, Buyer+Seller columns)`)
+        ok(/\$150\b/.test(liveText), 'item 2: live table shows the 2-license lot at $150/license (true unit price)')
       }
       if (view === 'ownership') {
         const board = await instr.locator('[data-testid="ownership-board"]').innerText().catch(() => '')
         ok(board.includes('🔒'), 'ownership board shows the under-auction 🔒 marker (mid-flight auction)')
         ok((await instr.locator('[data-testid="project-ownership"]').count()) === 1, 'ownership view has a Project button (projection feature)')
       }
-      if (view === 'graph') {
-        ok((await instr.locator('[data-testid="project-graph"]').count()) === 1, 'graph view has a Project button (projection feature)')
+      if (view === 'regions') {
+        // Item 6 — Per-region gains as a LIVE dashboard view (market OPEN here, sculpt is later).
+        await instr.locator('[data-testid="live-regions-table"]').waitFor({ timeout: 15_000 }).catch(() => {})
+        const regRows = await instr.locator('[data-testid^="live-region-row-"]').count()
+        const regText = await instr.locator('[data-testid="live-regions-table"]').innerText().catch(() => '')
+        ok(regRows === N_TEAMS / 2 && /Region/.test(regText) && /Efficient value/.test(regText),
+          `item 6: LIVE per-region gains view renders ${regRows} region rows against the OPEN market`)
       }
       const file = path.join(SHOT_DIR, `instructor-${view}.png`)
       await instr.screenshot({ path: file, fullPage: true })
@@ -550,9 +575,16 @@ async function main() {
     // In real use the "Project" buttons window.open this in a SEPARATE window; here we navigate the
     // same tab (it reuses the established instructor session) to prove the surface renders live. ──
     console.log('\n  Projection — full-screen live ownership + graph surfaces:')
+    await instr.setViewportSize({ width: 1280, height: 800 })
     await instr.goto(`${BASE}/project?view=ownership&token=${instrToken}&game_instance_id=${GID}&_session=tab`)
     const projOwn = await instr.locator('[data-testid="projection"] [data-testid="ownership-board"]').waitFor({ timeout: 30_000 }).then(() => true).catch(() => false)
     ok(projOwn, 'projection /project?view=ownership renders the LIVE ownership board full-screen')
+    // Item 3 — the board SCALES UP to fill the window (FillToWindow), not a small card in white
+    // space. Assert the rendered board spans most of the 1280-wide projection window.
+    await sleep(1200) // let FillToWindow measure + apply the scale
+    const boardBox = await instr.locator('[data-testid="projection"] [data-testid="ownership-board"]').boundingBox().catch(() => null)
+    ok(boardBox != null && boardBox.width >= 900,
+      `item 3: projected ownership board fills the window (rendered width ${boardBox ? Math.round(boardBox.width) : 'n/a'}px of 1280)`)
     await instr.screenshot({ path: path.join(SHOT_DIR, 'projection-ownership.png'), fullPage: true })
     log('  📸 projection ownership')
     await instr.goto(`${BASE}/project?view=graph&token=${instrToken}&game_instance_id=${GID}&_session=tab`)

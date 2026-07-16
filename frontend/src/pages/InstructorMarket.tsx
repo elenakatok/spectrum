@@ -3,30 +3,33 @@ import { collection, doc, onSnapshot } from 'firebase/firestore'
 import { db } from '../firebase'
 import { colors, layout, spacing, typography } from '@mygames/game-ui'
 import {
-  getLeaderboard, getTransactionGraph, getRoster, CLASSROOM_URL,
-  type Leaderboard, type TransactionGraph as TxGraph, type RosterParticipant,
+  getLeaderboard, getTransactionGraph, getMarketReport, getRoster,
+  type Leaderboard, type TransactionGraph as TxGraph, type MarketReport, type RosterParticipant,
 } from '../api'
 import type { LicenseDoc } from '../market/shared'
 import { money, clock } from '../market/shared'
 import OwnershipBoard from '../market/OwnershipBoard'
 import TransactionGraph from '../market/TransactionGraph'
+import LiveTransactionsTable from '../market/LiveTransactionsTable'
+import RegionGainsTable from '../market/RegionGainsTable'
 import { useInstructorSession } from '../hooks/useInstructorSession'
 
 // ── Spectrum Instructor market dashboard (Slice 4) — the projector view (v3 §12). ─────
-// Five views behind a nav bar: Team Performance (getLeaderboard), Ownership (the SAME
-// OwnershipBoard the students see — imported, never re-implemented), Transaction Graph
-// (getTransactionGraph — instructor only, by construction), Teams (getRoster + the public
-// groups, joined on the client), and Quiz Results (a classroom link — no market callable).
-// Public data (ownership, market clock) rides onSnapshot; the two cross-team reads ride the
-// instructor Bearer established by useInstructorSession.
+// Views behind a nav bar: Team Performance (getLeaderboard), Ownership (the SAME OwnershipBoard
+// the students see — imported, never re-implemented), Transaction Graph + a live running trades
+// table (getTransactionGraph + getMarketReport — instructor only, by construction), Per-region
+// gains (getMarketReport, updating LIVE as teams concentrate), and Teams (getRoster + the public
+// groups, joined on the client). Public data (ownership, market clock) rides onSnapshot; the
+// cross-team reads ride the instructor Bearer established by useInstructorSession. (Quiz Results
+// was removed — KC lives in the classroom gradebook, like the per-student report.)
 
-type View = 'performance' | 'ownership' | 'graph' | 'teams' | 'quiz'
+type View = 'performance' | 'ownership' | 'graph' | 'regions' | 'teams'
 const VIEWS: { key: View; label: string }[] = [
   { key: 'performance', label: 'Team Performance' },
   { key: 'ownership', label: 'Ownership' },
   { key: 'graph', label: 'Transaction Graph' },
+  { key: 'regions', label: 'Per-region gains' },
   { key: 'teams', label: 'Teams' },
-  { key: 'quiz', label: 'Quiz Results' },
 ]
 
 type MarketDoc = { status?: string; closes_at?: number | null }
@@ -82,6 +85,12 @@ function Dashboard({ gameInstanceId }: { gameInstanceId: string }) {
 
   return (
     <main style={shell} data-testid="instructor-market">
+      {/* Back to the regular instructor dashboard — carries the same launch params (token +
+          game_instance_id) so the dashboard re-establishes its session on arrival. */}
+      <a href={`/dashboard${window.location.search}`} data-testid="back-to-dashboard"
+        style={{ display: 'inline-block', marginBottom: spacing.gapSm, fontSize: '0.85rem', color: colors.textSecondary, textDecoration: 'none' }}>
+        ← Back to dashboard
+      </a>
       <div style={{ display: 'flex', alignItems: 'baseline', justifyContent: 'space-between', flexWrap: 'wrap', gap: spacing.gapMd, marginBottom: spacing.gapSm }}>
         <h1 style={{ margin: 0, fontSize: '1.4rem' }}>Spectrum — Live market</h1>
         <div style={{ fontSize: '0.9rem', color: marketOpen ? '#137333' : colors.textSecondary, fontWeight: 600 }} data-testid="market-clock">
@@ -108,8 +117,8 @@ function Dashboard({ gameInstanceId }: { gameInstanceId: string }) {
           </>
         )}
         {view === 'graph' && <GraphView />}
+        {view === 'regions' && <RegionGainsView />}
         {view === 'teams' && <TeamsView gameInstanceId={gameInstanceId} />}
-        {view === 'quiz' && <QuizView />}
       </div>
     </main>
   )
@@ -158,11 +167,12 @@ function PerformanceView() {
 
   return (
     <section data-testid="performance-view">
-      {/* Room aggregates */}
+      {/* Room aggregates — tile order matches the Leaderboard report (bug F / item 5):
+          Total Initial Value · Value After Trade · Efficient Market Value. */}
       <div style={{ display: 'flex', flexWrap: 'wrap', gap: spacing.gapMd, marginBottom: spacing.gapMd }}>
-        <Stat label="Efficient Market Value" value={money(eff)} testid="efficient-market-value" hint="the ceiling if every license landed on its best-fit team" />
         <Stat label="Total Initial Value" value={money(board.total_initial_value)} testid="total-initial-value" hint="portfolios at grouping, before any trade" />
         <Stat label="Value After Trade" value={money(board.value_after_trade)} testid="value-after-trade" hint={`Efficiency captured: ${captured}% of available gains from trade`} />
+        <Stat label="Efficient Market Value" value={money(eff)} testid="efficient-market-value" hint="the ceiling if every license landed on its best-fit team" />
       </div>
 
       <div style={{ overflowX: 'auto' }}>
@@ -190,12 +200,17 @@ function PerformanceView() {
   )
 }
 
-// ── View 3: Transaction Graph (getTransactionGraph — instructor only) ─────────────────
+// ── View 3: Transaction Graph + a live running trades table (getTransactionGraph feeds the
+//    graph; getMarketReport feeds the attributed table — both instructor only) ──────────────
 function GraphView() {
   const [graph, setGraph] = useState<TxGraph | null>(null)
+  const [report, setReport] = useState<MarketReport | null>(null)
   const [err, setErr] = useState('')
   const refresh = useCallback(() => {
     getTransactionGraph().then(setGraph).catch((e: unknown) => setErr(e instanceof Error ? e.message : 'Load failed.'))
+    // The table rides getMarketReport (it carries both parties + the server-computed per-license
+    // price the graph strips). Best-effort — a transient failure just leaves the last table up.
+    getMarketReport().then(setReport).catch(() => { /* transient — retried on the next tick */ })
   }, [])
   useEffect(() => { refresh(); const id = setInterval(refresh, 5000); return () => clearInterval(id) }, [refresh])
 
@@ -205,7 +220,41 @@ function GraphView() {
     <>
       <ProjectButton view="graph" label="Project the transaction graph" />
       <TransactionGraph points={graph.points} openedAt={graph.opened_at} closesAt={graph.closes_at} />
+      <h3 style={{ fontSize: '1rem', margin: `${spacing.gapMd} 0 ${spacing.gapSm}` }}>
+        Trades{report ? ` (${report.transactions.length})` : ''}
+      </h3>
+      {report
+        ? <LiveTransactionsTable transactions={report.transactions} openedAt={report.opened_at} />
+        : <p style={{ color: colors.textSecondary }}>Loading trades…</p>}
     </>
+  )
+}
+
+// ── View 4: Per-region gains from trade (getMarketReport — instructor only, LIVE) ─────
+// The SAME O(M) closed form as the post-game Report 3 (efficient = value(8) argmax; realized =
+// Σ current holders' own value(count); gap = the gains-from-trade still on the table), recomputed
+// live on the 5s cadence off current ownership — so the instructor watches the gap close in real
+// time as teams concentrate. getMarketReport is instructor-only BY CONSTRUCTION; a student caller
+// is rejected outright (the privacy walk asserts this on an OPEN market).
+function RegionGainsView() {
+  const [report, setReport] = useState<MarketReport | null>(null)
+  const [err, setErr] = useState('')
+  const refresh = useCallback(() => {
+    getMarketReport().then(setReport).catch((e: unknown) => setErr(e instanceof Error ? e.message : 'Load failed.'))
+  }, [])
+  useEffect(() => { refresh(); const id = setInterval(refresh, 5000); return () => clearInterval(id) }, [refresh])
+
+  if (err) return <p style={{ color: '#b3261e' }} data-testid="regions-error">{err}</p>
+  if (!report) return <p style={{ color: colors.textSecondary }}>Loading…</p>
+  const totalGap = report.regions.reduce((s, r) => s + r.gap, 0)
+  return (
+    <section data-testid="regions-view">
+      <p style={{ color: colors.textSecondary, fontSize: '0.85rem', marginTop: 0, marginBottom: spacing.gapSm }}>
+        Live gains-from-trade gap by region — updates as teams concentrate. Total gap still on the table:{' '}
+        <strong style={{ color: totalGap > 0 ? '#b3261e' : '#137333' }}>{money(totalGap)}</strong>. Instructor-only.
+      </p>
+      <RegionGainsTable regions={report.regions} tableTestid="live-regions-table" rowTestid={(r) => `live-region-row-${r}`} />
+    </section>
   )
 }
 
@@ -242,24 +291,6 @@ function TeamsView({ gameInstanceId }: { gameInstanceId: string }) {
             </ul>
           </div>
         ))}
-      </div>
-    </section>
-  )
-}
-
-// ── View 5: Quiz Results — not a market callable; the classroom holds the KC scores. ──
-function QuizView() {
-  return (
-    <section data-testid="quiz-view">
-      <div style={teamCard}>
-        <h2 style={{ marginTop: 0, fontSize: '1.1rem' }}>Quiz results live in the classroom</h2>
-        <p style={{ color: colors.textSecondary, lineHeight: 1.6 }}>
-          Knowledge-check scores are recorded and reported by the classroom, not the market. Open the classroom to review them per student.
-        </p>
-        <a href={CLASSROOM_URL} target="_blank" rel="noreferrer" data-testid="quiz-classroom-link"
-          style={{ display: 'inline-block', padding: `${spacing.gapSm} ${spacing.gapMd}`, background: '#D38626', color: '#fff', borderRadius: 6, textDecoration: 'none', fontWeight: 600 }}>
-          Open the classroom →
-        </a>
       </div>
     </section>
   )
