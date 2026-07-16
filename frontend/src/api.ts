@@ -299,6 +299,9 @@ export const groupParticipants = (numTeams: number) =>
 export const startMarket = () =>
   callFn<{ ok: boolean; alreadyStarted: boolean; opened_at: number | null; closes_at: number | null }>('startMarket', {})
 
+export const endMarket = () =>
+  callFn<{ ok: boolean; alreadyClosed: boolean; closes_at: number | null }>('endMarket', {})
+
 export const getMarketState = () =>
   callFn<MarketState>('getMarketState', {})
 

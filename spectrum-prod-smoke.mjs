@@ -63,6 +63,20 @@ function signToken(role, participantId, name) {
   }, KEY, { algorithm: 'RS256', keyid: 'classroom-v1' })
 }
 
+// An EXPIRED classroom JWT (exp 20 min in the past) — used to PROVE the dry-run item-1 fix: once an
+// instructor Firebase session exists, /market and /reports must REUSE it (auth.currentUser) and NOT
+// re-exchange the one-time launch token, so an expired token in the URL no longer breaks the page.
+function signExpiredToken(role, participantId, name) {
+  const now = Math.floor(Date.now() / 1000)
+  return jwt.sign({
+    iss: 'classroom.mygames.live', sub: participantId, iat: now - 3600, exp: now - 1200,
+    participant_id: participantId, name, course_id: 'smoke', session_id: 'smoke',
+    game_instance_id: GID, game_config_id: null, role,
+    classroom_callback_url: 'https://classroom.mygames.live/api/game-results',
+    callback_secret_id: 'spectrum_v1',
+  }, KEY, { algorithm: 'RS256', keyid: 'classroom-v1' })
+}
+
 // Call a DEPLOYED callable directly (onCall v2 over HTTP, same alias the browser SDK uses).
 // Student/instructor auth travels as a classroom JWT in data.token — the callables accept it
 // (the path assignRole bootstraps on); allUsers invoker means no IAM, and a node fetch is not
@@ -544,6 +558,46 @@ async function main() {
     await openReport('per-team', 'report-per-team', '4-per-team')
     await openReport('per-student', 'report-participation', '5-per-student')
     ok(true, 'five prod REPORTS screenshots captured (Report 3 against the scattered market)')
+
+    // ── Dry-run item 1 PROOF: the instructor session OUTLIVES the one-time launch token ─────────
+    // The classroom JWT expires in ~15 min; a market runs 90. Before the fix, opening /market (the
+    // "Open live market dashboard" link) or refreshing /reports after expiry re-exchanged the URL
+    // token via getInstructorSession → the red "jwt expired" page. The fix reuses auth.currentUser,
+    // so an EXPIRED token in the URL is ignored and the page renders from the live Firebase session.
+    // We reuse the SAME instr tab (its session is still alive) and re-navigate with an expired token;
+    // _session=tab (browserSessionPersistence) is the STRICTER case — real launches use the more
+    // durable browserLocalPersistence, so surviving here proves it survives a real 90-min market.
+    console.log('\n  Item 1 — instructor session survives an EXPIRED launch token (jwt-expired fix):')
+    const expired = signExpiredToken('instructor', 'smoke-instr', 'Smoke Instructor')
+    await instr.goto(`${BASE}/market?token=${expired}&game_instance_id=${GID}&_session=tab`)
+    const marketSurvives = await instr.locator('[data-testid="instructor-market"]').waitFor({ timeout: 30_000 }).then(() => true).catch(() => false)
+    const marketErr = await instr.getByText(/jwt expired/i).count().catch(() => 0)
+    ok(marketSurvives && marketErr === 0,
+      `/market renders with an EXPIRED token — reused session, no "jwt expired" [survives=${marketSurvives} err=${marketErr}]`)
+
+    await instr.goto(`${BASE}/reports?token=${expired}&game_instance_id=${GID}&_session=tab`)
+    const reportsSurvive = await instr.locator('[data-testid="report-tiles"]').waitFor({ timeout: 30_000 }).then(() => true).catch(() => false)
+    const reportsErr = await instr.getByText(/jwt expired/i).count().catch(() => 0)
+    ok(reportsSurvive && reportsErr === 0,
+      `/reports refresh renders with an EXPIRED token — reused session, no "jwt expired" [survives=${reportsSurvive} err=${reportsErr}]`)
+
+    // ── Dry-run item 9 PROOF: the roster "Outcome" column shows team Portfolio Value, not "+1" ────
+    // raw_score (the flat +1 participation grade) stays UNCHANGED in the gradebook — only the shown
+    // cell + header are repainted from getLeaderboard. Load /dashboard on the finalized instance and
+    // assert the roster's rightmost column reads a "$…" portfolio value under a "Portfolio Value" head.
+    console.log('\n  Item 9 — roster Outcome column repainted to team Portfolio Value:')
+    await instr.goto(`${BASE}/dashboard?token=${instrToken}&game_instance_id=${GID}&_session=tab`)
+    await instr.locator('[data-testid="roster-table"]').waitFor({ timeout: 30_000 }).catch(() => {})
+    let rosterText = ''
+    for (let i = 0; i < 15; i++) {   // let the 1.5s market poll + getLeaderboard + repaint settle
+      rosterText = await instr.locator('[data-testid="roster-table"]').innerText().catch(() => '')
+      if (/Portfolio Value/.test(rosterText) && /\$[\d,]+/.test(rosterText)) break
+      await sleep(1000)
+    }
+    ok(/Portfolio Value/.test(rosterText), 'roster Outcome header repainted to "Portfolio Value"')
+    ok(/\$[\d,]+/.test(rosterText), 'roster rightmost column shows a $ portfolio value (not the flat +1)')
+    await instr.screenshot({ path: path.join(SHOT_DIR, 'dashboard-portfolio-column.png'), fullPage: true })
+    log('  📸 dashboard portfolio column')
   } finally {
     await browser.close().catch(() => {})
     if (!KEEP) await restore(pids)

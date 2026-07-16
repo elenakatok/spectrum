@@ -733,6 +733,44 @@ async function main() {
     assert(strVal((await fsGet('market/state')).fields.status) === 'closed', `S9c: the flip persisted to the state doc`)
   }
 
+  // ══ S10 — MANUAL end market (dry-run item 6): REUSES the hard-close path ══
+  // "End market now" must do exactly what the clock does at closes_at. It pulls closes_at back to
+  // now (+ flips status → 'closed', the state getMarketState's resolve-on-read converges to), so
+  // an in-flight trade at manual close is rejected and moves NOTHING — identical to a clock close.
+  banner('S10 — end market now: manual close freezes the ledger identically to the clock')
+  {
+    // Fresh OPEN market closing WELL ahead (+20min), so ONLY the manual button can close it.
+    await seed({
+      closes_in_ms: 1_200_000,
+      teams: [
+        { team_number: 1, members: ['p-1'], cash: 1000, password: PW(1) },
+        { team_number: 2, members: ['p-2'], cash: 10000, password: PW(2) },
+      ],
+      licenses: [{ id: 'C1', region: 'C', owner_team: 1 }, { id: 'C2', region: 'C', owner_team: 1 }],
+    })
+    // Counterfactual: while genuinely open, a deal is accepted.
+    assert((await deal('p-1', 'C', 1, 300, 2, PW(2))).ok, `S10a: a deal on the OPEN market (closes +20min) is accepted`)
+
+    // Instructor ends the market early.
+    const rEnd = await callFn('endMarket', { _dev: { game_instance_id: GID } })
+    assert(rEnd.ok && rEnd.result?.alreadyClosed === false,
+      `S10b: endMarket closes an open market [${JSON.stringify(rEnd.result ?? rEnd.error)}]`)
+    assert(strVal((await fsGet('market/state')).fields.status) === 'closed',
+      `S10b: endMarket flipped the state doc to 'closed' (what resolve-on-read converges to)`)
+
+    // The SAME in-flight deal is now rejected and moves NOTHING — identical outcome to a clock close.
+    const heldBefore = await heldInRegion(1, 'C')
+    const rLate = await deal('p-1', 'C', 1, 300, 2, PW(2))
+    assert(!rLate.ok && /market (has closed|is not open)/i.test(rLate.error ?? ''),
+      `S10c: after endMarket the in-flight deal is REJECTED, same as a clock close [${rLate.error}]`)
+    assert((await heldInRegion(1, 'C')) === heldBefore, `S10c: the rejected late deal moved NOTHING`)
+
+    // Idempotent: a second endMarket (or one after the clock already closed it) is a no-op.
+    const rEnd2 = await callFn('endMarket', { _dev: { game_instance_id: GID } })
+    assert(rEnd2.ok && rEnd2.result?.alreadyClosed === true,
+      `S10d: a second endMarket is an idempotent no-op [${JSON.stringify(rEnd2.result ?? rEnd2.error)}]`)
+  }
+
   banner(`RESULT — ${PASS}/${PASS + FAIL} green${FAIL ? `  (${FAIL} FAILED)` : ''}`)
 }
 

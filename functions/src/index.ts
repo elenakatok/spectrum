@@ -24,7 +24,7 @@ import {
   makeGetInfoUrls,
 } from '@mygames/game-server'
 import { spectrumGameDef } from './gameDefinition'
-import { makeGroupParticipants, makeStartMarket, makeGetMarketState } from './grouping'
+import { makeGroupParticipants, makeStartMarket, makeEndMarket, makeGetMarketState } from './grouping'
 import { makeExecuteDeal, makeExecuteSwap, makeSettleAuction } from './ledger'
 import { makeCreateAuction, makePlaceBid, makeGetAuctionState, settleAuctionTask } from './auctionLifecycle'
 import { makeGetTeamState, makeGetTeamHistory, makeGetTeamsDirectory } from './studentReads'
@@ -57,6 +57,7 @@ export const syncRoster             = makeSyncRoster(spectrumGameDef)
 //   startMarket       → open the market and start the clock
 export const groupParticipants          = makeGroupParticipants(spectrumGameDef)
 export const startMarket                = makeStartMarket(spectrumGameDef)
+export const endMarket                  = makeEndMarket(spectrumGameDef)
 export const getMarketState             = makeGetMarketState(spectrumGameDef)
 
 // ── Ledger core (Slice 1) — the three transactional market mutations ──────────

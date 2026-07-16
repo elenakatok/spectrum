@@ -296,6 +296,62 @@ export function makeStartMarket(def: GameDefinition) {
 }
 
 /**
+ * "End market now" — instructor-only MANUAL hard close (dry-run item 6). Does EXACTLY what the
+ * clock does at closes_at, by REUSING the one server-authoritative trigger the hard close already
+ * keys off: it pulls closes_at back to now. That instant, requireMarketOpen (ledger.ts) rejects
+ * every in-flight trade — identical to the clock reaching the deadline; there is NO parallel close
+ * path. We ALSO flip status → 'closed' in the same write, which is precisely what getMarketState's
+ * resolve-on-read flip does one poll later — doing it atomically just lets the projector + students
+ * see "closed" without waiting for the next poll. In-flight actions are handled identically to a
+ * clock close: deals/swaps past closes_at are rejected by requireMarketOpen, and any running auction
+ * keeps its own ends_at lifecycle (a clock close leaves running auctions alone too). Requires an
+ * open market; idempotent — a second call, or one after the clock already closed it, is a no-op.
+ */
+export function makeEndMarket(def: GameDefinition) {
+  return onCall({ cors: def.corsOrigins }, async (request) => {
+    const data = request.data as Record<string, unknown>
+    const isEmulator = process.env.FUNCTIONS_EMULATOR === 'true'
+    const authHeader = request.rawRequest.headers.authorization as string | undefined
+    const gameInstanceId = await extractInstructorGameId(data, isEmulator, authHeader)
+
+    try {
+      const db = admin.firestore()
+      const stateRef = db.collection('game_instances').doc(gameInstanceId).collection('market').doc('state')
+
+      return await db.runTransaction(async (tx) => {
+        const snap = await tx.get(stateRef)
+        if (!snap.exists) {
+          throw new HttpsError('failed-precondition', 'The market has not been set up.')
+        }
+        const state = snap.data() as Record<string, unknown>
+        const status = state['status'] as string
+
+        if (status === 'closed') {
+          return {
+            ok: true as const,
+            alreadyClosed: true,
+            closes_at: (state['closes_at'] as Timestamp | null)?.toMillis?.() ?? null,
+          }
+        }
+        if (status !== 'open') {
+          throw new HttpsError('failed-precondition', `The market cannot be ended from status '${status}'.`)
+        }
+
+        // closes_at = now is the SAME trigger the clock reaches; the status flip mirrors
+        // getMarketState's resolve-on-read. Ledger freeze + close happen through the existing path.
+        const now = Timestamp.now()
+        tx.update(stateRef, { status: 'closed', closes_at: now })
+        return { ok: true as const, alreadyClosed: false, closes_at: now.toMillis() }
+      })
+    } catch (err) {
+      if (err instanceof HttpsError) throw err
+      console.error('[endMarket] error:', err)
+      throw new HttpsError('internal', 'Internal error')
+    }
+  })
+}
+
+/**
  * Read-only market state for the instructor dashboard poll (drives button enablement).
  * Returns { ok, status: 'setup' } when grouping has not run.
  */

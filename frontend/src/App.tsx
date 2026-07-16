@@ -17,8 +17,22 @@ const spectrumInfoLinks = [
   ]},
 ]
 
-// PHASE A SKELETON: no custom Settings sections. The trading-market knobs (market
-// duration, N teams, etc.) arrive with the market in Slices 0–5.
+// Instructor-editable market knobs on the game-creation/settings screen — same SettingsPage
+// mechanism eBay uses for its auction duration. Keys must match configFields in
+// functions/src/gameDefinition.ts; market_duration_minutes is read by startMarket at open time
+// (falls back to the compiled default of 90). N (numTeams) is NOT here — it is chosen on the
+// dashboard at grouping time.
+const spectrumConfigSections = [
+  {
+    id: 'market',
+    title: 'Market',
+    fields: [
+      { key: 'market_duration_minutes',  label: 'Market duration (minutes)',  kind: 'positiveInt' as const, placeholder: '90' },
+      { key: 'auction_duration_minutes', label: 'Auction duration (minutes)', kind: 'positiveInt' as const, placeholder: '4' },
+      { key: 'starting_cash',            label: 'Starting cash per team',      kind: 'positiveInt' as const, placeholder: '1000' },
+    ],
+  },
+]
 
 export default function App() {
   return (
@@ -36,6 +50,7 @@ export default function App() {
             auth={auth}
             roleLabels={spectrumRoleLabels}
             roleInfoLinks={spectrumInfoLinks}
+            configSections={spectrumConfigSections}
           />
         } />
       </Routes>

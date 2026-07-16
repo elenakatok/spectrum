@@ -1,4 +1,4 @@
-import { type CSSProperties, useState } from 'react'
+import { type CSSProperties, useEffect, useState } from 'react'
 import { colors, spacing } from '@mygames/game-ui'
 import { placeBid, type TeamState, type AuctionState } from '../api'
 import { money, regionValue, clock, type RegionSchedule } from './shared'
@@ -114,6 +114,17 @@ function AuctionCard({ a, myTeam, available, onActed }: { a: AuctionState; myTea
   const [err, setErr] = useState<string | null>(null)
   const [msg, setMsg] = useState<string | null>(null)
 
+  // Live 1-second countdown (dry-run item 7 — DISPLAY ONLY; settlement is server-side via the
+  // auction's own ends_at task, untouched). The parent polls getAuctionState every 5s, so the
+  // server's time_remaining_ms only refreshes every 5s and the readout used to jump in 5s steps.
+  // We anchor an absolute local deadline from each fresh poll (Date.now() + time_remaining_ms) and
+  // tick it down every second in between; each poll re-anchors it, correcting any drift.
+  const [deadline, setDeadline] = useState(() => Date.now() + a.time_remaining_ms)
+  useEffect(() => { setDeadline(Date.now() + a.time_remaining_ms) }, [a.time_remaining_ms])
+  const [now, setNow] = useState(() => Date.now())
+  useEffect(() => { const id = setInterval(() => setNow(Date.now()), 1000); return () => clearInterval(id) }, [])
+  const remaining = Math.max(0, deadline - now)
+
   const mine = a.seller_team === myTeam
   const alreadyBid = a.your_bid != null
   const bid = () => {
@@ -127,7 +138,7 @@ function AuctionCard({ a, myTeam, available, onActed }: { a: AuctionState; myTea
   return (
     <div data-testid={`auction-${a.auction_id}`} style={{ border: '1px solid #d0d7de', borderRadius: 6, padding: '0.5rem 0.75rem', display: 'flex', gap: '0.75rem', alignItems: 'center', flexWrap: 'wrap' }}>
       <div><strong>Region {a.region}</strong> · {a.quantity} unit{a.quantity === 1 ? '' : 's'} · Team {a.seller_team} selling</div>
-      <div style={{ color: colors.textSecondary, fontSize: '0.85rem' }}>ends in {clock(a.time_remaining_ms)}</div>
+      <div style={{ color: colors.textSecondary, fontSize: '0.85rem' }}>ends in {clock(remaining)}</div>
       {mine ? (
         <span style={{ color: colors.textSecondary, fontSize: '0.85rem' }}>Your auction — you can't bid.</span>
       ) : alreadyBid ? (

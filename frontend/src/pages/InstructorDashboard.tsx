@@ -1,9 +1,9 @@
-import { useEffect, useState } from 'react'
+import { useEffect, useRef, useState } from 'react'
 import { createPortal } from 'react-dom'
 import { InstructorDashboard as SharedDashboard } from '@mygames/game-ui'
 import { auth, functions, rtdb } from '../firebase'
 import { spectrumConfig } from '../gameConfig'
-import { groupParticipants, startMarket, getMarketState, getLeaderboard, type MarketState } from '../api'
+import { groupParticipants, startMarket, endMarket, getMarketState, getLeaderboard, type MarketState } from '../api'
 
 const roleLabels = Object.fromEntries(
   spectrumConfig.roles.map(r => [r.key, r.label])
@@ -30,8 +30,9 @@ const money = (n: number | null | undefined) =>
 // survives the shared component's re-renders (sort, roster refresh):
 //   1. hide "Match Now" — Spectrum groups via the panel above, not the rolling matcher;
 //   2. hide the vestigial single-role "Show: Trader" roster filter (one role → nothing to filter);
-//   3. "Teams" everywhere, never "Groups" (v3 §11 / Slice 3): relabel the roster "Group #" header.
-function tidySharedDashboard() {
+//   3. "Teams" everywhere, never "Groups" (v3 §11 / Slice 3): relabel the roster "Group #" header;
+//   4. Outcome column → live team Portfolio Value (dry-run item 9) when the leaderboard is loaded.
+function tidySharedDashboard(board?: Map<number, number>) {
   for (const btn of Array.from(document.querySelectorAll('button'))) {
     const t = (btn.textContent ?? '').trim()
     if (t === 'Match Now' || t === 'Matching…') (btn as HTMLElement).style.display = 'none'
@@ -51,6 +52,40 @@ function tidySharedDashboard() {
       }
     }
   }
+
+  // 4. Outcome column → team Portfolio Value (dry-run item 9, Elena-approved local override).
+  // The shared "Outcome" cell shows raw_score — Spectrum's FLAT participation grade (+1), which is
+  // load-bearing for the gradebook (the playthrough asserts "value never graded"). So we NEVER touch
+  // raw_score; we only REPAINT the displayed cell + header from getLeaderboard. Grades are unchanged.
+  // Column order is fixed [name, role, status, Team#, Outcome] → Outcome is the LAST <td>, Team # the
+  // one before it. Idempotent (writes only when the text differs → never retriggers the observer);
+  // re-applied every tick/mutation so it survives the shared roster re-rendering the +1 back in.
+  if (board && board.size) {
+    const table = document.querySelector('[data-testid="roster-table"] table')
+    if (table) {
+      for (const th of Array.from(table.querySelectorAll('thead th'))) {
+        for (const node of Array.from(th.childNodes)) {
+          if (node.nodeType === Node.TEXT_NODE && node.nodeValue?.trim() === 'Outcome') {
+            node.nodeValue = 'Portfolio Value'
+          }
+        }
+      }
+      for (const tr of Array.from(table.querySelectorAll('tbody tr'))) {
+        const tds = tr.querySelectorAll('td')
+        if (tds.length < 2) continue
+        const teamNum = parseInt(((tds[tds.length - 2].textContent ?? '').match(/\d+/) ?? [''])[0], 10)
+        const pv = board.get(teamNum)
+        if (!Number.isFinite(teamNum) || pv == null) continue
+        const outCell = tds[tds.length - 1] as HTMLElement
+        const target = (outCell.querySelector('span') ?? outCell) as HTMLElement
+        const shown = '$' + Math.round(pv).toLocaleString('en-US')
+        if (target.textContent !== shown) {
+          target.textContent = shown
+          target.style.color = '#333'   // undo the faint-null styling if the row had been "—"
+        }
+      }
+    }
+  }
 }
 
 // Live market progress (invariant 5): current value = Σ team portfolios; efficiency captured =
@@ -67,6 +102,9 @@ function GroupingPanel() {
   const [nSet, setNSet] = useState<number | null>(null)
   const [busy, setBusy] = useState(false)
   const [msg, setMsg] = useState('')
+  // team_number → portfolio_value, from getLeaderboard — feeds the roster Outcome→Portfolio repaint
+  // (item 9). A ref (not state) so the MutationObserver/tidy always read the latest without re-binding.
+  const boardRef = useRef<Map<number, number>>(new Map())
 
   // Mount a host as the first child of the shared <main>; portal the strip into it.
   useEffect(() => {
@@ -88,10 +126,10 @@ function GroupingPanel() {
   useEffect(() => {
     const obs = new MutationObserver(() => {
       obs.disconnect()
-      tidySharedDashboard()
+      tidySharedDashboard(boardRef.current)
       obs.observe(document.body, { childList: true, subtree: true })
     })
-    tidySharedDashboard()
+    tidySharedDashboard(boardRef.current)
     obs.observe(document.body, { childList: true, subtree: true })
     return () => obs.disconnect()
   }, [])
@@ -100,16 +138,22 @@ function GroupingPanel() {
   useEffect(() => {
     let alive = true
     const tick = () => {
-      tidySharedDashboard()
+      tidySharedDashboard(boardRef.current)
       getMarketState()
         .then(s => {
           if (!alive) return
           setState(s)
           // Once open, poll the live leaderboard for the current-value + efficiency readout
-          // (same refresh cadence as the leaderboard view — invariant 5).
+          // (same refresh cadence as the leaderboard view — invariant 5) AND the per-team portfolio
+          // values that repaint the roster Outcome column (item 9).
           if (s.status === 'open' || s.status === 'closed') {
             getLeaderboard()
-              .then(b => { if (alive) setProgress({ current: b.value_after_trade, initial: b.total_initial_value, efficient: b.efficient_market_value }) })
+              .then(b => {
+                if (!alive) return
+                setProgress({ current: b.value_after_trade, initial: b.total_initial_value, efficient: b.efficient_market_value })
+                boardRef.current = new Map(b.teams.map(t => [t.team_number, t.portfolio_value]))
+                tidySharedDashboard(boardRef.current)   // repaint immediately with the fresh values
+              })
               .catch(() => { /* transient — retried next tick */ })
           }
         })
@@ -153,6 +197,17 @@ function GroupingPanel() {
     startMarket()
       .then(r => setMsg(r.alreadyStarted ? 'Market already open.' : 'Market open — the clock is running.'))
       .catch((e: unknown) => setMsg(e instanceof Error ? e.message : 'Start failed.'))
+      .finally(() => setBusy(false))
+  }
+
+  // End the market early (dry-run item 6) — reuses the hard-close path (server pulls closes_at to
+  // now, freezing the ledger exactly like the clock). Irreversible, so confirm first.
+  const doEnd = () => {
+    if (!window.confirm('End the market now for everyone? Trading freezes immediately — exactly like the clock reaching the deadline. This cannot be undone.')) return
+    setBusy(true); setMsg('Ending market…')
+    endMarket()
+      .then(r => setMsg(r.alreadyClosed ? 'Market already closed.' : 'Market ended — trading is frozen. Run the reports and Score & Record when ready.'))
+      .catch((e: unknown) => setMsg(e instanceof Error ? e.message : 'End failed.'))
       .finally(() => setBusy(false))
   }
 
@@ -215,12 +270,24 @@ function GroupingPanel() {
               style={{ fontSize: '0.9rem', fontWeight: 600, color: '#D38626' }}>
               Open live market dashboard →
             </a>
+            {status === 'open' && (
+              <button data-testid="end-market" onClick={doEnd} disabled={busy}
+                style={{ fontSize: '0.85rem', color: '#8b1a1a', borderColor: '#e0b4b4', cursor: 'pointer' }}>
+                End market now
+              </button>
+            )}
           </div>
-          {/* Live progress — current market value (Σ portfolios) + efficiency captured. 0% at open. */}
+          {/* Live progress — full efficiency numbers (dry-run item 10): current + efficient market
+              value, plus the raw gains-captured / gains-available the % is computed from. 0% at open. */}
           <span data-testid="market-progress" style={{ fontSize: '0.9rem', color: '#555' }}>
             Current Market Value <strong>{money(progress?.current)}</strong>
+            {' · '}Efficient Market Value <strong>{money(progress?.efficient)}</strong>
             {' · '}Efficiency captured <strong>{progress ? efficiencyPct(progress) : 0}%</strong>
-            {' '}<span style={{ color: '#888' }}>of available gains from trade</span>
+            {progress && (
+              <span style={{ color: '#888' }}>
+                {' '}— gains captured {money(progress.current - progress.initial)} of {money(progress.efficient - progress.initial)} available
+              </span>
+            )}
           </span>
         </div>
       )}
