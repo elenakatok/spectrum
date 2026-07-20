@@ -108,36 +108,71 @@ export function makeGetTeamHistory(def: GameDefinition) {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// 3. getTeamsDirectory — the public team→names roster (v3 §11.3). NAMES ONLY: never a
-//    portfolio, cash, password, or synergy. Gated behind student auth so it is unreachable
-//    from an unauthenticated session (privacy-walk leg 5 asserts exactly this).
+// 3. getTeamsDirectory — the public team→names roster (v3 §11.3). NAMES ONLY for
+//    every team except the caller's own, which additionally carries member EMAILS
+//    so a student can find their own teammates before the market opens. Gated
+//    behind student auth so it is unreachable from an unauthenticated session
+//    (privacy-walk leg 5 asserts exactly this).
+//
+//    OWN TEAM ONLY, and deliberately so. Reaching ANOTHER team is not an email
+//    problem — Spectrum's mechanic is walking over in person, which the
+//    counterparty-typed password exists to force. Other teams therefore return
+//    email: null, never an address.
+//
+//    The caller's team is resolved SERVER-SIDE by finding the group whose
+//    trader_participants contains the authenticated participantId. No team
+//    identifier is read from the request, so there is no parameter a student can
+//    supply to be treated as a member of a team they are not on — the standing
+//    rule for all three of these read-only callables.
+//
+//    Wire shape is ADDITIVE: member_names stays exactly as it was (all teams,
+//    names only) and members[] is new alongside it. That keeps a frontend
+//    deployed before the functions working, and a frontend deployed after them
+//    working too, in either deploy order.
 // ─────────────────────────────────────────────────────────────────────────────
 export function makeGetTeamsDirectory(def: GameDefinition) {
   return onCall({ cors: def.corsOrigins }, async (request) => {
     const data = request.data as Record<string, unknown>
-    const { gameInstanceId } = await extractStudentOnCallIds(data, isEmu(), authHeaderOf(request))
+    const { participantId, gameInstanceId } = await extractStudentOnCallIds(data, isEmu(), authHeaderOf(request))
     const instanceRef = admin.firestore().collection('game_instances').doc(gameInstanceId)
 
     const [groupsSnap, partsSnap] = await Promise.all([
       instanceRef.collection('groups').get(),
       instanceRef.collection('participants').get(),
     ])
-    const nameOf = (pid: string): string => {
-      const d = partsSnap.docs.find((p) => p.id === pid)?.data() ?? {}
-      return String(d['display_name'] ?? d['name'] ?? '').trim()
-    }
 
-    const teams = groupsSnap.docs
-      .map((d) => d.data())
-      .filter((g) => g['team_number'] != null)
-      .map((g) => ({
-        team_number: g['team_number'] as number,
-        member_names: ((g['trader_participants'] as string[] | undefined) ?? [])
-          .map(nameOf)
-          .filter((n) => n.length > 0),
-      }))
+    const partById = new Map(partsSnap.docs.map((p) => [p.id, p.data()]))
+    const nameOf = (pid: string): string =>
+      String(partById.get(pid)?.['display_name'] ?? partById.get(pid)?.['name'] ?? '').trim()
+    // Legacy participants predate email on the roster; absent or blank yields
+    // null, which the client renders as nothing rather than an empty line.
+    const emailOf = (pid: string): string | null =>
+      String(partById.get(pid)?.['email'] ?? '').trim() || null
+
+    const groups = groupsSnap.docs.map((d) => d.data()).filter((g) => g['team_number'] != null)
+
+    const membersOf = (g: Record<string, unknown>): string[] =>
+      (g['trader_participants'] as string[] | undefined) ?? []
+
+    const ownTeamNumber = groups.find((g) => membersOf(g).includes(participantId))?.['team_number'] ?? null
+
+    const teams = groups
+      .map((g) => {
+        const isOwnTeam = ownTeamNumber != null && g['team_number'] === ownTeamNumber
+        const named = membersOf(g)
+          .map((pid) => ({ pid, name: nameOf(pid) }))
+          .filter((m) => m.name.length > 0)
+        return {
+          team_number: g['team_number'] as number,
+          member_names: named.map((m) => m.name),
+          members: named.map((m) => ({
+            name: m.name,
+            email: isOwnTeam ? emailOf(m.pid) : null,
+          })),
+        }
+      })
       .sort((a, b) => a.team_number - b.team_number)
 
-    return { ok: true as const, teams }
+    return { ok: true as const, own_team_number: ownTeamNumber, teams }
   })
 }

@@ -128,9 +128,16 @@ export type HistoryRow = {
 export const getTeamHistory = () =>
   callFn<{ ok: boolean; team_number: number; rows: HistoryRow[] }>('getTeamHistory', {})
 
-export type TeamDirectoryEntry = { team_number: number; member_names: string[] }
+/** email is non-null ONLY on the caller's own team — every other team is names-only. */
+export type TeamMember = { name: string; email: string | null }
+export type TeamDirectoryEntry = {
+  team_number: number
+  member_names: string[]
+  /** Optional so a frontend can run against functions deployed before this landed. */
+  members?: TeamMember[]
+}
 export const getTeamsDirectory = () =>
-  callFn<{ ok: boolean; teams: TeamDirectoryEntry[] }>('getTeamsDirectory', {})
+  callFn<{ ok: boolean; own_team_number?: number | null; teams: TeamDirectoryEntry[] }>('getTeamsDirectory', {})
 
 // ── Instructor read-paths (Slice 4) — the dashboard's five views ─────────────────────
 // SDK auto-attaches the instructor Firebase Bearer once the dashboard session exists. These
