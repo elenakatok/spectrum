@@ -130,6 +130,38 @@ async function seed(spec) {
   if (!res.ok) throw new Error(`seed failed: ${res.status} ${await res.text()}`)
 }
 
+// Minimal JS→Firestore-typed encoder + a REST PATCH writer (owner). Used only by the
+// LATE section to create an UNPLACED latecomer + the attendance code, and to enrich the
+// seeded truth with the two fields seedLedgerTest omits (endowment_regions, license_value)
+// that real grouping always writes (grouping.ts:172-182). Pass `mask` to MERGE named
+// fields; omit it to create/replace the whole doc.
+function encVal(v) {
+  if (typeof v === 'string') return { stringValue: v }
+  if (typeof v === 'boolean') return { booleanValue: v }
+  if (typeof v === 'number') return { integerValue: String(v) }
+  if (Array.isArray(v)) return { arrayValue: { values: v.map(encVal) } }
+  if (v && typeof v === 'object' && '__ts' in v) return { timestampValue: v.__ts }
+  throw new Error(`encVal: unsupported ${JSON.stringify(v)}`)
+}
+async function fsWrite(suffix, obj, mask) {
+  const fields = {}
+  for (const [k, v] of Object.entries(obj)) fields[k] = encVal(v)
+  const q = mask ? '?' + mask.map(k => `updateMask.fieldPaths=${encodeURIComponent(k)}`).join('&') : ''
+  // Same base as fsGet/fsList: everything lives under this game instance.
+  const res = await fetch(`${FIRESTORE}/game_instances/${GID}/${suffix}${q}`, {
+    method: 'PATCH',
+    headers: { Authorization: 'Bearer owner', 'Content-Type': 'application/json' },
+    body: JSON.stringify({ fields }),
+  })
+  if (!res.ok) throw new Error(`fsWrite ${suffix} failed: ${res.status} ${await res.text()}`)
+}
+const nowTs = () => ({ __ts: new Date().toISOString() })
+// A group's trader_participants (membership) as a plain string[].
+async function members(team) {
+  const d = await fsGet(`groups/team-${team}`)
+  return (d?.fields?.trader_participants?.arrayValue?.values ?? []).map(v => v.stringValue)
+}
+
 // Assert exactly one of the two settled results succeeded; return {winner, loser}.
 function exactlyOne(a, b, label) {
   const oks = [a, b].filter(r => r.ok).length
@@ -769,6 +801,176 @@ async function main() {
     const rEnd2 = await callFn('endMarket', { _dev: { game_instance_id: GID } })
     assert(rEnd2.ok && rEnd2.result?.alreadyClosed === true,
       `S10d: a second endMarket is an idempotent no-op [${JSON.stringify(rEnd2.result ?? rEnd2.error)}]`)
+  }
+
+  // ══ LATE — latecomer auto-placement (Latecomer_Placement_Spec_v1 §3.1) ══
+  // Spectrum is the read-then-write onPlace case: a latecomer joins an EXISTING team via
+  // the SHARED makeVerifyAttendanceCode door and is stamped from that team's CURRENT truth
+  // (spectrumOnPlace). Grouping is untouched; onPlace only READS the truth doc.
+  banner('LATE — latecomer joins the smallest team, stamped from CURRENT truth (no truth write)')
+  {
+    // team-1 = ONE member → smallest → target. cash 999 (NOT the 1000 initial) proves the
+    // stamp comes from CURRENT truth. team-1 owns A1 (lx will sell), team-2 owns B1 (lx's
+    // team will buy — exercising lx's STAMPED password as buyer-side auth).
+    await seed({
+      teams: [
+        { team_number: 1, members: ['p-1'],         cash: 999,  password: PW(1) },
+        { team_number: 2, members: ['p-2', 'p-2b'], cash: 1500, password: PW(2) },
+      ],
+      licenses: [
+        { id: 'A1', region: 'A', owner_team: 1 },
+        { id: 'B1', region: 'B', owner_team: 2 },
+      ],
+    })
+    // Enrich both truths to the real grouping shape (seedLedgerTest omits these two;
+    // production truth ALWAYS carries them, so onPlace never sees undefined).
+    for (const t of [1, 2]) {
+      await fsWrite(`groups/team-${t}/truth/team`,
+        { endowment_regions: t === 1 ? ['A'] : ['B'], license_value: 400 },
+        ['endowment_regions', 'license_value'])
+    }
+    await fsWrite('attendance_code/current', { code: 'LATE1' })
+    const LX = 'late-x'
+    await fsWrite(`participants/${LX}`, {
+      participant_id: LX, game_instance_id: GID, role: 'trader',
+      confirmed_ready_at: nowTs(),        // the makeVerifyAttendanceCode gate
+    })
+
+    // Snapshots BEFORE the join (only headcount should change).
+    const t1Before = await truth(1)
+    const cashSumBefore = await totalCash([1, 2])       // 999 + 1500 = 2499
+    const g1Before = await members(1)                    // ['p-1']
+
+    const rVerify = await callFn('verifyAttendanceCode', { _test: { participant_id: LX, game_instance_id: GID }, code: 'LATE1' })
+    assert(rVerify.ok, `LATE-place: verifyAttendanceCode triggers placement [${rVerify.error ?? ''}]`)
+
+    const lx = (await fsGet(`participants/${LX}`)).fields ?? {}
+    const g1After = await members(1)
+    const t1After = await truth(1)
+
+    // ── TEST 2: placed onto the smallest team; mirror from CURRENT truth ──
+    assert(strVal(lx.group_id) === 'team-1' && numVal(lx.team_number) === 1,
+      `LATE-2: placed onto the smallest team (team-1) [group=${strVal(lx.group_id)} team=${numVal(lx.team_number)}]`)
+    assert(lx.is_lead?.booleanValue === false, `LATE-2: is_lead=false (a latecomer never leads)`)
+    assert(numVal(lx.team_cash) === 999,
+      `LATE-2: team_cash stamped from CURRENT truth (999), NOT the 1000 initial [${numVal(lx.team_cash)}]`)
+    assert(g1Before.length === 1 && g1After.length === 2 && g1After.includes(LX),
+      `LATE-2: arrayUnion added the latecomer to trader_participants [${g1Before.length}→${g1After.length}]`)
+
+    // ── TEST 5: the truth doc is UNTOUCHED — only headcount rose ──
+    assert(t1After.cash === t1Before.cash && t1After.cash === 999,
+      `LATE-5: team-1 truth cash unchanged by the join (999) [${t1After.cash}]`)
+    assert(JSON.stringify(t1After.license_ids) === JSON.stringify(t1Before.license_ids),
+      `LATE-5: team-1 truth holdings unchanged by the join [${JSON.stringify(t1After.license_ids)}]`)
+    assert(t1After.portfolio_value === t1Before.portfolio_value,
+      `LATE-5: team-1 truth portfolio_value unchanged by the join`)
+
+    // ── TEST 6: cash conservation holds across the join (no cash minted) ──
+    assert((await totalCash([1, 2])) === cashSumBefore,
+      `LATE-6: Σ team cash unchanged by the join (${cashSumBefore})`)
+
+    // ── TEST 8: mirror matches what grouping writes (grouping.ts:186-197), field-for-field.
+    // seedLedgerTest writes a MINIMAL member doc (no mirror), so the reference is the exact
+    // 10-field set makeGroupParticipants stamps — asserted present, correct, and no extras.
+    const teamKeys = Object.keys(lx).filter(k => k.startsWith('team_'))
+    const expectTeamKeys = ['team_number', 'team_password', 'team_synergy', 'team_endowment_regions',
+      'team_license_ids', 'team_cash', 'team_license_value', 'team_portfolio_value'].sort()
+    assert(JSON.stringify(teamKeys.slice().sort()) === JSON.stringify(expectTeamKeys),
+      `LATE-8: mirror has exactly the grouping team_* field set, no extras/omissions [${teamKeys.sort().join(',')}]`)
+    assert(strVal(lx.team_password) === PW(1) && !!lx.team_synergy?.arrayValue,
+      `LATE-8: LOAD-BEARING team_password (=${strVal(lx.team_password)}) and team_synergy both stamped`)
+    assert(JSON.stringify(arrVal(lx.team_endowment_regions)) === JSON.stringify(['A']) &&
+           numVal(lx.team_license_value) === 400 &&
+           JSON.stringify(arrVal(lx.team_license_ids)) === JSON.stringify(t1Before.license_ids) &&
+           numVal(lx.team_portfolio_value) === t1Before.portfolio_value,
+      `LATE-8: static + from-current fields all match the (enriched) truth`)
+
+    // ── TEST 4: the five tabs resolve for the latecomer ──
+    const rState = await callFn('getTeamState',     { _test: { participant_id: LX, game_instance_id: GID } })
+    const rHist  = await callFn('getTeamHistory',   { _test: { participant_id: LX, game_instance_id: GID } })
+    const rDir   = await callFn('getTeamsDirectory',{ _test: { participant_id: LX, game_instance_id: GID } })
+    assert(rState.ok && rState.result?.team_number === 1,
+      `LATE-4: getTeamState resolves for the latecomer (team 1) [${rState.error ?? JSON.stringify(rState.result?.team_number)}]`)
+    assert(rHist.ok, `LATE-4: getTeamHistory resolves for the latecomer [${rHist.error ?? ''}]`)
+    assert(rDir.ok,  `LATE-4: getTeamsDirectory resolves for the latecomer [${rDir.error ?? ''}]`)
+
+    // ── TEST 3 (CRITICAL): the latecomer TRADES ──
+    // (a) team-1 BUYS B1 from team-2, authorized by lx's STAMPED password → proves the
+    //     password stamp is valid team-1 auth (a bad/missing stamp → permission-denied).
+    const rBuy = await deal('p-2', 'B', 1, 200, 1, strVal(lx.team_password))
+    assert(rBuy.ok,
+      `LATE-3a: a deal authorized by the latecomer's STAMPED team_password succeeds (proves team_password) [${rBuy.error ?? ''}]`)
+    // (b) the latecomer ACTS as a team-1 seller → proves group_id+team_number stamps let
+    //     them transact at all (executeDeal resolves the seller from the actor's own doc).
+    const rSell = await deal(LX, 'A', 1, 250, 2, PW(2))
+    assert(rSell.ok,
+      `LATE-3b: the latecomer acts as a team-1 seller (proves group_id+team_number) [${rSell.error ?? ''}]`)
+    // (c) valuation: getTeamState values the team's holdings via truth.synergy (server-side),
+    //     and lx.team_synergy is stamped so the client can value too (proves team_synergy).
+    const rState2 = await callFn('getTeamState', { _test: { participant_id: LX, game_instance_id: GID } })
+    assert(rState2.ok && typeof rState2.result?.portfolio_value === 'number',
+      `LATE-3c: getTeamState values the team's holdings for the latecomer (proves team_synergy path) [${rState2.error ?? ''}]`)
+  }
+
+  // ══ LATE-CLOSED — a latecomer who arrives AFTER the market closes is ABSENT (Part A guard) ══
+  banner('LATE-CLOSED — post-close latecomer falls through to absent (not placed)')
+  {
+    await seed({
+      teams: [
+        { team_number: 1, members: ['q-1'],         cash: 1000, password: PW(1) },
+        { team_number: 2, members: ['q-2', 'q-2b'], cash: 1000, password: PW(2) },
+      ],
+      licenses: [],
+      market_status: 'closed',        // spectrumIsJoinable ⇒ false for every team
+    })
+    await fsWrite('attendance_code/current', { code: 'LATE2' })
+    const LY = 'late-y'
+    await fsWrite(`participants/${LY}`, {
+      participant_id: LY, game_instance_id: GID, role: 'trader', confirmed_ready_at: nowTs(),
+    })
+    const rV = await callFn('verifyAttendanceCode', { _test: { participant_id: LY, game_instance_id: GID }, code: 'LATE2' })
+    const ly = (await fsGet(`participants/${LY}`)).fields ?? {}
+    assert(rV.ok, `LATE-7: verifyAttendanceCode still succeeds (attendance recorded) [${rV.error ?? ''}]`)
+    assert(ly.group_id == null && ly.latecomer_absent?.booleanValue === true,
+      `LATE-7: post-close latecomer is ABSENT (no group_id, latecomer_absent set), NOT placed into a dead market`)
+    assert(!(await members(1)).includes(LY) && !(await members(2)).includes(LY),
+      `LATE-7: the absent latecomer is in no team's trader_participants`)
+  }
+
+  // ══ LATE-CONCURRENT — two simultaneous latecomers, same smallest team, no lost write (§3.4) ══
+  banner('LATE-CONCURRENT — two latecomers join the smallest team at once; both survive')
+  {
+    // team-1 = 1 member, team-2 = 3 → team-1 stays strictly smallest after ONE join, so both
+    // deterministically target team-1 (no tiebreak); the arrayUnion must keep both memberships.
+    await seed({
+      teams: [
+        { team_number: 1, members: ['r-1'],                 cash: 1000, password: PW(1) },
+        { team_number: 2, members: ['r-2', 'r-2b', 'r-2c'], cash: 1000, password: PW(2) },
+      ],
+      licenses: [],
+    })
+    for (const t of [1, 2]) {
+      await fsWrite(`groups/team-${t}/truth/team`,
+        { endowment_regions: ['A'], license_value: 400 }, ['endowment_regions', 'license_value'])
+    }
+    await fsWrite('attendance_code/current', { code: 'LATE3' })
+    const [LA, LB] = ['late-a', 'late-b']
+    for (const p of [LA, LB]) {
+      await fsWrite(`participants/${p}`, {
+        participant_id: p, game_instance_id: GID, role: 'trader', confirmed_ready_at: nowTs(),
+      })
+    }
+    const [ra, rb] = await Promise.all([
+      callFn('verifyAttendanceCode', { _test: { participant_id: LA, game_instance_id: GID }, code: 'LATE3' }),
+      callFn('verifyAttendanceCode', { _test: { participant_id: LB, game_instance_id: GID }, code: 'LATE3' }),
+    ])
+    const fa = (await fsGet(`participants/${LA}`)).fields ?? {}
+    const fb = (await fsGet(`participants/${LB}`)).fields ?? {}
+    const g1 = await members(1)
+    assert(ra.ok && rb.ok && strVal(fa.group_id) === 'team-1' && strVal(fb.group_id) === 'team-1',
+      `LATE-9: both simultaneous latecomers placed onto the smallest team (team-1)`)
+    assert(g1.includes(LA) && g1.includes(LB) && g1.length === 3,
+      `LATE-9: both memberships survive the concurrent arrayUnion — neither write lost [${g1.join(',')}]`)
   }
 
   banner(`RESULT — ${PASS}/${PASS + FAIL} green${FAIL ? `  (${FAIL} FAILED)` : ''}`)

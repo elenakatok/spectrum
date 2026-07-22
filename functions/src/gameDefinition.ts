@@ -1,5 +1,8 @@
 import type { Outcome, OutcomeSchema, RoleConfig } from '@mygames/game-engine'
 import type { GameDefinition, PrepTextQuestion } from '@mygames/game-server'
+// Latecomer placement (Latecomer_Placement_Spec_v1 §3.1) — Spectrum-specific: joinable
+// while the market is not closed; onPlace stamps the team mirror from current truth.
+import { spectrumIsJoinable, spectrumOnPlace } from './latecomer'
 
 // ═══════════════════════════════════════════════════════════════════════════════
 // Spectrum — SINGLE-ROLE game. PHASE A SKELETON (blank canvas).
@@ -128,6 +131,10 @@ export const spectrumGameDef: GameDefinition = {
   reservations: { trader: 0 },
   corsOrigins: ['https://spectrum.mygames.live'],
   classroom: { callbackSecretId: 'spectrum_v1' },
+  // Latecomer auto-placement (spec §3.1). A latecomer joins the smallest team while
+  // the market is open and is stamped from that team's CURRENT truth state.
+  isJoinable: spectrumIsJoinable,
+  onPlace: spectrumOnPlace,
 
   // Single-role sizing: base group {trader:4}; perRoleCap 7 lets one group absorb the
   // remainder up to size 7 (shared matcher tiling: 6→[6], 7→[7], 11→[6,5], 9→[5,4]).
